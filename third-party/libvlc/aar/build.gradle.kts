@@ -33,6 +33,13 @@ android {
         jniLibs.srcDir(nativeOutput.resolve("jni"))
     }
 
+    packaging {
+        jniLibs {
+            // build-native.sh strips the libraries it hands over; packaged as they are.
+            keepDebugSymbols += "**/*.so"
+        }
+    }
+
     publishing {
         singleVariant("release")
     }
