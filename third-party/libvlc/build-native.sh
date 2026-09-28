@@ -134,9 +134,9 @@ module_blacklist=(
     http https access_http adaptive access_mms ftp udp tcp rtp rist satip sdp vdr avio
     hds smooth access_concat unixsocket imem shm dtv dvb timecode decomp directory_demux noseek
     # Outputs and services the app does not use: memory audio, the network LED-wall display,
-    # the audio fingerprinter, cover art from the media's folder, the console log, and the
-    # pre-MediaCodec OMX decoder, which needs platform libraries Android no longer exposes.
-    amem flaschen fingerprinter folder console_logger iomx
+    # the audio fingerprinter, cover art from the media's folder and the console log. (The OMX
+    # module, iomx, stays: the MediaCodec decoder links its picture-copy routines.)
+    amem flaschen fingerprinter folder console_logger
     # Credential stores, which only network access asks.
     '(memory|file)_keystore'
     # Playlist files, external subtitle files and the video filters nothing enables.
