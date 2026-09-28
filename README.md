@@ -10,14 +10,15 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-2 | `libvlc-lgpl-3.7.6-2` |
 | 3.7.6-1 | `libvlc-lgpl-3.7.6-1` |
 
 ## Contents
 
 | Path | What it is |
 |---|---|
-| `sources/libvlcjni-ddde54ff-drive-player.tar.xz` | libvlcjni at commit `ddde54fff93ab40c529a46eae80fe357ae0af97e`, with Drive Player's patch applied |
-| `sources/vlc-66455a98-drive-player.tar.xz` | VLC media player 3.0 at commit `66455a98c8c515796b4a192acaa125c5d68c76c8`, with libvlcjni's patches and Drive Player's patch applied. It includes VLC's contrib build system (`contrib/src`), with the patches it applies to the third-party components |
+| `sources/libvlcjni-ddde54ff-drive-player.tar.xz` | libvlcjni at commit `ddde54fff93ab40c529a46eae80fe357ae0af97e`, with Drive Player's patches applied |
+| `sources/vlc-66455a98-drive-player.tar.xz` | VLC media player 3.0 at commit `66455a98c8c515796b4a192acaa125c5d68c76c8`, with libvlcjni's patches and Drive Player's patches applied. It includes VLC's contrib build system (`contrib/src`), with the patches it applies to the third-party components |
 | `sources/contrib/` | The source archives of the 24 third-party components linked into `libvlc.so`, as published by each project |
 | `sources/SHA256SUMS` | Checksums of the archives above |
 | `third-party/libvlc/build-native.sh` | The script that builds `libvlc.so`, `libvlcjni.so` and `libc++_shared.so` |
@@ -43,6 +44,16 @@ components under the GNU General Public License. This build leaves every such co
   build leaves that Java file out of the packaged sources.
 - `patches/vlc/0001-deinterlace-build-without-the-yadif-algorithm.patch`: the yadif algorithm, whose
   sources are published under the GPL, is removed from the deinterlace module.
+
+Two further patches let the app serve a media's bytes through callbacks instead of a file descriptor
+it answers itself. Such a descriptor (Android's proxy file descriptor) cannot be torn down when the
+app's process is killed while libVLC waits on a read, and keeps a CPU core busy until the device
+restarts:
+
+- `patches/libvlcjni/0002-add-a-media-read-through-java-callbacks.patch`: `org.videolan.libvlc.MediaInput`
+  and a `Media` constructor that reads through it (`libvlc_media_new_callbacks`).
+- `patches/vlc/0002-imem-access-report-seekable-callbacks-as-fast-seekable.patch`: a callback input that
+  answers seeks is read like a file, rather than through the prefetch filter's large background reads.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and

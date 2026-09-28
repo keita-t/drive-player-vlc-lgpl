@@ -1,0 +1,326 @@
+From 4553f6d834fe832bfe51ba2795185ec6b10b0e55 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 28 Sep 2026 22:46:10 +0900
+Subject: [PATCH] Add a Media read through Java callbacks (MediaInput)
+
+An application that serves a media's bytes itself could only hand libVLC
+a file descriptor. A descriptor backed by the application's own process
+(StorageManager.openProxyFileDescriptor) cannot be torn down when that
+process is killed while libVLC waits on a read: the waiting thread needs
+the answer from the process that is exiting, and the process cannot exit
+until the thread does.
+
+MediaInput lets libVLC read the bytes through callbacks instead
+(libvlc_media_new_callbacks), with no file system in between. The Java
+input is kept by the native media until libvlc_MediaFreed, since a player
+opens the media after the Java Media is usually released.
+---
+ libvlc/jni/libvlcjni-media.c                  | 184 ++++++++++++++++++
+ libvlc/src/org/videolan/libvlc/Media.java     |  14 ++
+ .../src/org/videolan/libvlc/MediaInput.java   |  60 ++++++
+ 3 files changed, 258 insertions(+)
+ create mode 100644 libvlc/src/org/videolan/libvlc/MediaInput.java
+
+diff --git a/libvlc/jni/libvlcjni-media.c b/libvlc/jni/libvlcjni-media.c
+index 8cb696e..97573a8 100644
+--- a/libvlc/jni/libvlcjni-media.c
++++ b/libvlc/jni/libvlcjni-media.c
+@@ -18,6 +18,8 @@
+  * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
+  *****************************************************************************/
+ 
++#include <stdbool.h>
++#include <stdint.h>
+ #include <stdlib.h>
+ #include <pthread.h>
+ #include <unistd.h>
+@@ -313,6 +315,188 @@ Java_org_videolan_libvlc_Media_nativeNewFromFdWithOffsetLength(
+     }
+ }
+ 
++/*
++ * A media read through an org.videolan.libvlc.MediaInput. The state below is
++ * owned by the native media, not by the Java Media: libVLC opens the media
++ * when a player plays it, which may be after the Java Media was released, so
++ * the Java input is kept until the media itself is freed.
++ */
++JNIEnv *jni_get_env(const char *name);
++
++#define MEDIA_INPUT_THREAD_NAME "VlcMediaInput"
++
++struct media_input
++{
++    jobject input; /* global reference to the Java MediaInput */
++    jmethodID open;
++    jmethodID read;
++    jmethodID seek;
++    jmethodID close;
++};
++
++/* Whether the last call threw: the exception is cleared, since the caller is
++ * a libVLC thread with nothing to throw it to, and the call reported as failed. */
++static bool
++media_input_threw(JNIEnv *env)
++{
++    if (!(*env)->ExceptionCheck(env))
++        return false;
++    (*env)->ExceptionClear(env);
++    return true;
++}
++
++static int
++media_input_open(void *opaque, void **datap, uint64_t *sizep)
++{
++    struct media_input *mi = opaque;
++    JNIEnv *env = jni_get_env(MEDIA_INPUT_THREAD_NAME);
++    if (!env)
++        return -1;
++
++    jlong size = (*env)->CallLongMethod(env, mi->input, mi->open);
++    if (media_input_threw(env) || size < 0)
++        return -1;
++
++    *datap = mi;
++    *sizep = (uint64_t) size;
++    return 0;
++}
++
++static ssize_t
++media_input_read(void *opaque, unsigned char *buf, size_t len)
++{
++    struct media_input *mi = opaque;
++    JNIEnv *env = jni_get_env(MEDIA_INPUT_THREAD_NAME);
++    if (!env)
++        return -1;
++
++    if (len > INT32_MAX)
++        len = INT32_MAX;
++    jobject buffer = (*env)->NewDirectByteBuffer(env, buf, (jlong) len);
++    if (!buffer)
++    {
++        media_input_threw(env);
++        return -1;
++    }
++    jint count = (*env)->CallIntMethod(env, mi->input, mi->read, buffer);
++    (*env)->DeleteLocalRef(env, buffer);
++    if (media_input_threw(env))
++        return -1;
++    return count < 0 ? -1 : count;
++}
++
++static int
++media_input_seek(void *opaque, uint64_t offset)
++{
++    struct media_input *mi = opaque;
++    JNIEnv *env = jni_get_env(MEDIA_INPUT_THREAD_NAME);
++    if (!env)
++        return -1;
++
++    jboolean done = (*env)->CallBooleanMethod(env, mi->input, mi->seek, (jlong) offset);
++    if (media_input_threw(env))
++        return -1;
++    return done ? 0 : -1;
++}
++
++static void
++media_input_close(void *opaque)
++{
++    struct media_input *mi = opaque;
++    JNIEnv *env = jni_get_env(MEDIA_INPUT_THREAD_NAME);
++    if (!env)
++        return;
++
++    (*env)->CallVoidMethod(env, mi->input, mi->close);
++    media_input_threw(env);
++}
++
++static void
++media_input_free(JNIEnv *env, struct media_input *mi)
++{
++    if (env && mi->input)
++        (*env)->DeleteGlobalRef(env, mi->input);
++    free(mi);
++}
++
++/* The native media is being freed: no callback can come after this. */
++static void
++media_input_freed(const libvlc_event_t *p_ev, void *opaque)
++{
++    (void) p_ev;
++    media_input_free(jni_get_env(MEDIA_INPUT_THREAD_NAME), opaque);
++}
++
++void
++Java_org_videolan_libvlc_Media_nativeNewFromInput(JNIEnv *env, jobject thiz,
++                                                  jobject libVlc, jobject jinput)
++{
++    if (!jinput)
++    {
++        throw_Exception(env, VLCJNI_EX_ILLEGAL_ARGUMENT, "input invalid");
++        return;
++    }
++
++    struct media_input *mi = calloc(1, sizeof(*mi));
++    if (!mi)
++    {
++        throw_Exception(env, VLCJNI_EX_OUT_OF_MEMORY, "can't create Media input");
++        return;
++    }
++
++    jclass clazz = (*env)->FindClass(env, "org/videolan/libvlc/MediaInput");
++    if (!clazz)
++    {
++        free(mi);
++        return; /* NoClassDefFoundError pending */
++    }
++    mi->open = (*env)->GetMethodID(env, clazz, "open", "()J");
++    mi->read = (*env)->GetMethodID(env, clazz, "read", "(Ljava/nio/ByteBuffer;)I");
++    mi->seek = (*env)->GetMethodID(env, clazz, "seek", "(J)Z");
++    mi->close = (*env)->GetMethodID(env, clazz, "close", "()V");
++    (*env)->DeleteLocalRef(env, clazz);
++    if (!mi->open || !mi->read || !mi->seek || !mi->close)
++    {
++        free(mi);
++        return; /* NoSuchMethodError pending */
++    }
++
++    mi->input = (*env)->NewGlobalRef(env, jinput);
++    if (!mi->input)
++    {
++        free(mi);
++        throw_Exception(env, VLCJNI_EX_OUT_OF_MEMORY, "can't create Media input");
++        return;
++    }
++
++    vlcjni_object *p_obj = VLCJniObject_newFromJavaLibVlc(env, thiz, libVlc);
++    if (!p_obj)
++    {
++        media_input_free(env, mi);
++        return;
++    }
++
++    p_obj->u.p_m =
++        libvlc_media_new_callbacks(p_obj->p_libvlc,
++                                   media_input_open,
++                                   media_input_read,
++                                   media_input_seek,
++                                   media_input_close,
++                                   mi);
++    if (p_obj->u.p_m
++     && libvlc_event_attach(libvlc_media_event_manager(p_obj->u.p_m),
++                            libvlc_MediaFreed, media_input_freed, mi) != 0)
++    {
++        /* Nothing would free the input with the media: give both up. */
++        libvlc_media_release(p_obj->u.p_m);
++        p_obj->u.p_m = NULL;
++    }
++    if (!p_obj->u.p_m)
++        media_input_free(env, mi);
++
++    Media_nativeNewCommon(env, thiz, p_obj);
++}
++
+ /* MediaList must be locked */
+ void
+ Java_org_videolan_libvlc_Media_nativeNewFromMediaList(JNIEnv *env, jobject thiz,
+diff --git a/libvlc/src/org/videolan/libvlc/Media.java b/libvlc/src/org/videolan/libvlc/Media.java
+index 58a40ec..3f9295a 100644
+--- a/libvlc/src/org/videolan/libvlc/Media.java
++++ b/libvlc/src/org/videolan/libvlc/Media.java
+@@ -168,6 +168,19 @@ public class Media extends VLCObject<IMedia.Event> implements IMedia {
+         mUri = VLCUtil.UriFromMrl(nativeGetMrl());
+     }
+ 
++    /**
++     * Create a Media from libVLC and a MediaInput: libVLC reads the media through the input's
++     * callbacks instead of opening it itself.
++     *
++     * @param ILibVLC a valid LibVLC
++     * @param input the bytes of the media
++     */
++    public Media(ILibVLC ILibVLC, MediaInput input) {
++        super(ILibVLC);
++        nativeNewFromInput(ILibVLC, input);
++        mUri = VLCUtil.UriFromMrl(nativeGetMrl());
++    }
++
+     /**
+      *
+      * @param ml Should not be released and locked
+@@ -592,6 +605,7 @@ public class Media extends VLCObject<IMedia.Event> implements IMedia {
+     private native void nativeNewFromLocation(ILibVLC ILibVLC, String location);
+     private native void nativeNewFromFd(ILibVLC ILibVLC, FileDescriptor fd);
+     private native void nativeNewFromFdWithOffsetLength(ILibVLC ILibVLC, FileDescriptor fd, long offset, long length);
++    private native void nativeNewFromInput(ILibVLC ILibVLC, MediaInput input);
+     private native void nativeNewFromMediaList(IMediaList ml, int index);
+     private native void nativeRelease();
+     private native boolean nativeParseAsync(int flags, int timeout);
+diff --git a/libvlc/src/org/videolan/libvlc/MediaInput.java b/libvlc/src/org/videolan/libvlc/MediaInput.java
+new file mode 100644
+index 0000000..f76ba45
+--- /dev/null
++++ b/libvlc/src/org/videolan/libvlc/MediaInput.java
+@@ -0,0 +1,60 @@
++/*****************************************************************************
++ * MediaInput.java
++ *****************************************************************************
++ * Copyright © 2026 Drive Player authors
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++package org.videolan.libvlc;
++
++import java.nio.ByteBuffer;
++
++/**
++ * The bytes of a {@link Media} served by the application, read through these callbacks rather than
++ * opened by libVLC from a path, a location or a file descriptor.
++ *
++ * libVLC calls every method from its own threads, one call at a time for one opening of the media,
++ * and waits for each to return: a call that blocks holds up that playback, including stopping it.
++ * The input is kept until the native media is freed, which may be after {@link Media#release()}
++ * when a player still holds it, and may be opened again by a later playback of the same media.
++ */
++public interface MediaInput {
++
++    /**
++     * The media is being opened; the next read starts at offset 0.
++     *
++     * @return the total size in bytes, or a negative value if the input cannot be opened
++     */
++    long open();
++
++    /**
++     * Fill {@code buffer}, from its position up to its limit, with the next bytes of the media.
++     * The buffer wraps libVLC's own memory and is valid only during this call.
++     *
++     * @return the number of bytes written, 0 at the end of the media, or a negative value on error
++     */
++    int read(ByteBuffer buffer);
++
++    /**
++     * Continue reading at {@code offset}.
++     *
++     * @return whether the next read starts there
++     */
++    boolean seek(long offset);
++
++    /** The opening of the media has ended. */
++    void close();
++}
+-- 
+2.55.0
+

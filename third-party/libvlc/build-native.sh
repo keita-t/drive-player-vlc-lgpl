@@ -128,11 +128,11 @@ module_blacklist=(
     # Modules that write what they read to a file (the demux dumper, the stream recorder, the
     # file audio output): nothing here may write media anywhere.
     demuxdump record afile
-    # Inputs other than the app's descriptor bridge (fd://): network access and streaming
-    # protocols, tuners, memory and shared-memory inputs, and the external decompressor, which
-    # forks a process.
+    # Inputs other than the app's own, which serves every byte through libVLC's callback input
+    # (the imem module, behind patches/libvlcjni/0002): network access and streaming protocols,
+    # tuners, shared memory, and the external decompressor, which forks a process.
     http https access_http adaptive access_mms ftp udp tcp rtp rist satip sdp vdr avio
-    hds smooth access_concat unixsocket imem shm dtv dvb timecode decomp directory_demux noseek
+    hds smooth access_concat unixsocket shm dtv dvb timecode decomp directory_demux noseek
     # Outputs and services the app does not use: memory audio, the network LED-wall display,
     # the audio fingerprinter, cover art from the media's folder and the console log. (The OMX
     # module, iomx, stays: the MediaCodec decoder links its picture-copy routines.)

@@ -1,0 +1,34 @@
+From 017ba77a09dcca493adabdfe94fb3dd201089d41 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 28 Sep 2026 23:02:09 +0900
+Subject: [PATCH] imem-access: report seekable callbacks as fast-seekable
+
+libvlc_media_new_callbacks media were never fast-seekable, so the input
+put the prefetch filter in front of them. With its defaults it reads
+16 MiB per request in a thread of its own before the first picture, and
+serves a seek from that buffer. An application whose callbacks answer
+seeks serves its bytes like a file, and is read like one: straight
+through, as a local file is.
+---
+ modules/access/imem-access.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/modules/access/imem-access.c b/modules/access/imem-access.c
+index 25547c1..418827a 100644
+--- a/modules/access/imem-access.c
++++ b/modules/access/imem-access.c
+@@ -79,7 +79,10 @@ static int Control(stream_t *access, int query, va_list args)
+             break;
+ 
+         case STREAM_CAN_FASTSEEK:
+-            *va_arg(args, bool *) = false;
++            /* An application that answers seeks serves its bytes like a file:
++             * reads go straight through, as for a local file, rather than
++             * through the prefetch filter's large background reads. */
++            *va_arg(args, bool *) = sys->seek_cb != NULL;
+             break;
+ 
+         case STREAM_CAN_PAUSE:
+-- 
+2.55.0
+
