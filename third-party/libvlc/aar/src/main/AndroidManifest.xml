@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The bindings declare no component or permission; their own manifest only restates the package
+     through the attribute the Android Gradle Plugin now takes from `namespace`. -->
+<manifest />

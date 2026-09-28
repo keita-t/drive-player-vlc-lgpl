@@ -1,0 +1,74 @@
+From 59ef1d748aa6277793de2df38dad27d37c3ad31a Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Mon, 28 Sep 2026 14:02:45 +0900
+Subject: [PATCH] deinterlace: build without the yadif algorithm
+
+yadif.h and yadif_template.h are the one part of the deinterlace module
+whose headers publish them under the GNU General Public License; the rest
+of the module is LGPL-2.1. This drops the yadif and yadif2x modes and their
+sources, so the module can be linked into an LGPL-only libVLC. The default
+mode, "auto", selects "x" and is unaffected.
+---
+ modules/video_filter/Makefile.am               | 2 --
+ modules/video_filter/deinterlace/deinterlace.c | 4 ----
+ modules/video_filter/deinterlace/deinterlace.h | 5 ++---
+ 3 files changed, 2 insertions(+), 9 deletions(-)
+
+diff --git a/modules/video_filter/Makefile.am b/modules/video_filter/Makefile.am
+index f65344d..c1d8d08 100644
+--- a/modules/video_filter/Makefile.am
++++ b/modules/video_filter/Makefile.am
+@@ -131,8 +131,6 @@ libdeinterlace_plugin_la_SOURCES = \
+ 	video_filter/deinterlace/helpers.c video_filter/deinterlace/helpers.h \
+ 	video_filter/deinterlace/algo_basic.c video_filter/deinterlace/algo_basic.h \
+ 	video_filter/deinterlace/algo_x.c video_filter/deinterlace/algo_x.h \
+-	video_filter/deinterlace/algo_yadif.c video_filter/deinterlace/algo_yadif.h \
+-	video_filter/deinterlace/yadif.h video_filter/deinterlace/yadif_template.h \
+ 	video_filter/deinterlace/algo_phosphor.c video_filter/deinterlace/algo_phosphor.h \
+ 	video_filter/deinterlace/algo_ivtc.c video_filter/deinterlace/algo_ivtc.h
+ # inline ASM doesn't build with -O0
+diff --git a/modules/video_filter/deinterlace/deinterlace.c b/modules/video_filter/deinterlace/deinterlace.c
+index 9f9d529..073424d 100644
+--- a/modules/video_filter/deinterlace/deinterlace.c
++++ b/modules/video_filter/deinterlace/deinterlace.c
+@@ -362,10 +362,6 @@ static struct filter_mode_t filter_mode [] = {
+                  { false, false, false, true }, true, true },
+     { "blend", .pf_render_single_pic = RenderBlend,
+                  { false, false, false, false }, true, true },
+-    { "yadif", .pf_render_single_pic = RenderYadifSingle,
+-                 { false, true, false, false }, false, true },
+-    { "yadif2x", .pf_render_ordered = RenderYadif,
+-                 { true, true, false, false }, false, true },
+     { "x", .pf_render_single_pic = RenderX,
+                  { false, false, false, false }, false, false },
+     { "phosphor", .pf_render_ordered = RenderPhosphor,
+diff --git a/modules/video_filter/deinterlace/deinterlace.h b/modules/video_filter/deinterlace/deinterlace.h
+index 355f2f4..e79629b 100644
+--- a/modules/video_filter/deinterlace/deinterlace.h
++++ b/modules/video_filter/deinterlace/deinterlace.h
+@@ -39,7 +39,6 @@ struct vlc_object_t;
+ /* Local algorithm headers */
+ #include "algo_basic.h"
+ #include "algo_x.h"
+-#include "algo_yadif.h"
+ #include "algo_phosphor.h"
+ #include "algo_ivtc.h"
+ #include "common.h"
+@@ -51,12 +50,12 @@ struct vlc_object_t;
+ /** Available deinterlace modes. */
+ static const char *const mode_list[] = {
+     "discard", "blend", "mean", "bob", "linear", "x",
+-    "yadif", "yadif2x", "phosphor", "ivtc" };
++    "phosphor", "ivtc" };
+ 
+ /** User labels for the available deinterlace modes. */
+ static const char *const mode_list_text[] = {
+     N_("Discard"), N_("Blend"), N_("Mean"), N_("Bob"), N_("Linear"), "X",
+-    "Yadif", "Yadif (2x)", N_("Phosphor"), N_("Film NTSC (IVTC)") };
++    N_("Phosphor"), N_("Film NTSC (IVTC)") };
+ 
+ /*****************************************************************************
+  * Data structures
+-- 
+2.55.0
+
