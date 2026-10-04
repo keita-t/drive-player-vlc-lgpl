@@ -26,7 +26,8 @@
 #  - modules: upstream's exclusions plus the GPL-licensed and unused ones (module_blacklist), and
 #    the build stops if any module left declares the GPL;
 #  - patches/: the few source changes the LGPL-only result needs, the app's callback input needs,
-#    and the app's track changes need (an output that plays a stream to its end before reporting it).
+#    and the app's track changes need (an output that plays a stream to its end before reporting it,
+#    and a decoder made while its input is paused that waits paused).
 # When the pin moves, diff upstream's compile-libvlc.sh between the two commits and carry what
 # changed over to this script.
 

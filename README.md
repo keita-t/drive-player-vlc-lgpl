@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-4 | `libvlc-lgpl-3.7.6-4` |
 | 3.7.6-3 | `libvlc-lgpl-3.7.6-3` |
 | 3.7.6-2 | `libvlc-lgpl-3.7.6-2` |
 | 3.7.6-1 | `libvlc-lgpl-3.7.6-1` |
@@ -66,6 +67,15 @@ the output's release:
 - `patches/vlc/0004-input-check-for-drained-decoders-at-the-end-more-oft.patch`: at the end of a stream the
   input checks for drained decoders every 10 ms rather than every 100 ms, so the end is reported as soon
   as the audio has been played.
+
+One more lets the app open the next track ahead of time and hold it before its first sound
+(`start-paused`), whatever its format. Pausing an input paused the decoders it had, but a decoder made
+afterwards started unpaused. Ogg's demuxer finds its streams in the first data pages, after such an
+input has paused, so an Ogg track (Vorbis, Opus) played the start it had buffered while it waited:
+
+- `patches/vlc/0005-es_out-start-a-decoder-made-while-the-input-is-pause.patch`: a decoder made while the
+  input is paused starts paused, as `input_DecoderChangePause`'s FIXME describes for a track added while
+  paused.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and

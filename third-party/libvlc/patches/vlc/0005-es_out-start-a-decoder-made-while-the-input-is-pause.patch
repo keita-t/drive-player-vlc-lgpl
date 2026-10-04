@@ -1,0 +1,44 @@
+From ad53fab0d2aebad6ff71976a73beb69ec07630c1 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 4 Oct 2026 17:05:24 +0900
+Subject: [PATCH] es_out: start a decoder made while the input is paused paused
+
+Pausing the input pauses the decoders it has, but a decoder made
+afterwards starts unpaused. A demuxer that finds a stream only in
+its first data pages, such as Ogg's, creates its decoder after an
+input started with start-paused has paused: that decoder then
+decodes and plays the data buffered for the start while the input
+waits, and the media resumes past it.
+
+Pause such a decoder when it is made, as input_DecoderChangePause's
+FIXME describes for a track added while paused.
+---
+ src/input/es_out.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/input/es_out.c b/src/input/es_out.c
+index 4be24ba..c8331bf 100644
+--- a/src/input/es_out.c
++++ b/src/input/es_out.c
+@@ -1682,12 +1682,18 @@ static void EsCreateDecoder( es_out_t *out, es_out_id_t *p_es )
+     {
+         if( p_sys->b_buffering )
+             input_DecoderStartWait( p_es->p_dec );
++        /* A decoder made while the input is paused starts paused, as the
++         * others were paused: otherwise it plays what it is given. */
++        if( p_sys->b_paused )
++            input_DecoderChangePause( p_es->p_dec, true, p_sys->i_pause_date );
+ 
+         if( !p_es->p_master && p_sys->p_sout_record )
+         {
+             p_es->p_dec_record = input_DecoderNew( p_input, &p_es->fmt, p_es->p_pgrm->p_clock, p_sys->p_sout_record );
+             if( p_es->p_dec_record && p_sys->b_buffering )
+                 input_DecoderStartWait( p_es->p_dec_record );
++            if( p_es->p_dec_record && p_sys->b_paused )
++                input_DecoderChangePause( p_es->p_dec_record, true, p_sys->i_pause_date );
+         }
+     }
+ 
+-- 
+2.55.0
+
