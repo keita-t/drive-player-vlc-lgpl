@@ -1,0 +1,45 @@
+From a9b287763c2d8680f1f31b22586a50369480884d Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 4 Oct 2026 08:32:26 +0900
+Subject: [PATCH] input: check for drained decoders at the end more often
+
+At the end of the stream the input notices that the decoders have
+drained only by checking every INPUT_IDLE_SLEEP, 100 ms. Playback is
+over the moment they are, so the end - and with play-and-pause, the
+pause it is reported by - came up to 100 ms after it, and an
+application moving on to the next media left that much silence.
+
+Check every 10 ms while waiting for the drain.
+---
+ src/input/input.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/input/input.c b/src/input/input.c
+index e513b24..a898411 100644
+--- a/src/input/input.c
++++ b/src/input/input.c
+@@ -56,6 +56,9 @@
+ #include <vlc_stream_extractor.h>
+ #include <vlc_renderer_discovery.h>
+ 
++/* How often the end of the stream checks whether the decoders have drained. */
++#define INPUT_EOF_DRAIN_SLEEP (CLOCK_FREQ/100)
++
+ /*****************************************************************************
+  * Local prototypes
+  *****************************************************************************/
+@@ -731,7 +734,10 @@ static void MainLoop( input_thread_t *p_input, bool b_interactive )
+             else if( !es_out_GetEmpty( input_priv(p_input)->p_es_out ) )
+             {
+                 msg_Dbg( p_input, "waiting decoder fifos to empty" );
+-                i_wakeup = mdate() + INPUT_IDLE_SLEEP;
++                /* The end of the stream is noticed only by this check, and
++                 * playback is over the moment the decoders are: checked as
++                 * seldom as idling, the end is reported up to that late. */
++                i_wakeup = mdate() + INPUT_EOF_DRAIN_SLEEP;
+             }
+             /* Pause after eof only if the input is pausable.
+              * This way we won't trigger timeshifting for nothing */
+-- 
+2.55.0
+

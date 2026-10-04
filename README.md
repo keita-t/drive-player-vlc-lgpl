@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-3 | `libvlc-lgpl-3.7.6-3` |
 | 3.7.6-2 | `libvlc-lgpl-3.7.6-2` |
 | 3.7.6-1 | `libvlc-lgpl-3.7.6-1` |
 
@@ -54,6 +55,17 @@ restarts:
   and a `Media` constructor that reads through it (`libvlc_media_new_callbacks`).
 - `patches/vlc/0002-imem-access-report-seekable-callbacks-as-fast-seekable.patch`: a callback input that
   answers seeks is read like a file, rather than through the prefetch filter's large background reads.
+
+Two more keep the end of every track when the app moves on to the next one. VLC's Android audio output
+ended its drain once it had written the audio to the `AudioTrack`; what the `AudioTrack` still held (twice
+the device's minimum buffer, some 100 ms) was then discarded by the pause at the end of the media and by
+the output's release:
+
+- `patches/vlc/0003-audiotrack-drain-until-the-written-audio-has-been-pl.patch`: the drain waits until the
+  `AudioTrack`'s playback head has reached the frames written, bounded by the time they take and 200 ms.
+- `patches/vlc/0004-input-check-for-drained-decoders-at-the-end-more-oft.patch`: at the end of a stream the
+  input checks for drained decoders every 10 ms rather than every 100 ms, so the end is reported as soon
+  as the audio has been played.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and

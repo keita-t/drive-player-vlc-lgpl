@@ -1,0 +1,94 @@
+From ff4bb38f54300e6e5539d4214f9aa0691aaab66d Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sun, 4 Oct 2026 08:32:13 +0900
+Subject: [PATCH] audiotrack: drain until the written audio has been played
+
+A drain waited only until the circular buffer had been written to the
+AudioTrack, then called stop(), which lets the track play what it holds.
+But a drained output is the end of the stream to the input: with
+play-and-pause it pauses the output right away, and otherwise the
+decoder and the output are destroyed, and either discards what the
+AudioTrack still holds - up to its whole buffer, some 100 ms of the end
+of every track on a phone.
+
+Wait for the playback head to reach the frames written before stopping,
+bounded by the time those frames take and a margin.
+---
+ modules/audio_output/audiotrack.c | 47 +++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/modules/audio_output/audiotrack.c b/modules/audio_output/audiotrack.c
+index cb29083..d45c614 100644
+--- a/modules/audio_output/audiotrack.c
++++ b/modules/audio_output/audiotrack.c
+@@ -37,6 +37,8 @@
+ 
+ #define SMOOTHPOS_SAMPLE_COUNT 10
+ #define SMOOTHPOS_INTERVAL_US INT64_C(30000) // 30ms
++#define DRAIN_POLL_US INT64_C(5000) // 5ms
++#define DRAIN_MARGIN_US INT64_C(200000) // 200ms
+ 
+ #define AUDIOTIMESTAMP_INTERVAL_US INT64_C(500000) // 500ms
+ 
+@@ -1995,6 +1997,49 @@ bailout:
+     vlc_mutex_unlock( &p_sys->lock );
+ }
+ 
++/**
++ * Wait until the AudioTrack has played what was written to it.
++ *
++ * A drain is the end of the stream to the input, which pauses or stops the
++ * player right after; either one discards what the AudioTrack still holds,
++ * up to its whole buffer. So the drain waits for the playback head to reach
++ * the frames written, while the track still plays: stop() would let it play
++ * them too, but resets the head, which leaves nothing to wait on.
++ *
++ * Bounded by the time the pending frames take and a margin, so that a track
++ * that stopped consuming does not hold the decoder: the mixer consumes a
++ * last partial period only once it has seen the track underrun.
++ */
++static void
++AudioTrack_WaitPlayed( JNIEnv *env, audio_output_t *p_aout )
++{
++    aout_sys_t *p_sys = p_aout->sys;
++
++    if( p_sys->b_passthrough || p_sys->b_thread_paused )
++        return;
++
++    uint64_t i_pos = AudioTrack_getPlaybackHeadPosition( env, p_aout );
++    if( i_pos >= p_sys->i_samples_written )
++        return;
++
++    const vlc_tick_t i_deadline = mdate() + DRAIN_MARGIN_US
++        + FRAMES_TO_US( p_sys->i_samples_written - i_pos );
++    while( !p_sys->b_error && !p_sys->b_thread_paused
++        && AudioTrack_getPlaybackHeadPosition( env, p_aout )
++           < p_sys->i_samples_written )
++    {
++        const vlc_tick_t i_wake = mdate() + DRAIN_POLL_US;
++        if( i_wake > i_deadline )
++        {
++            msg_Warn( p_aout, "drain: the AudioTrack did not play out" );
++            break;
++        }
++        /* Nothing signals this while draining: a sleep that lets the
++         * writer thread and the position queries take the lock. */
++        vlc_cond_timedwait( &p_sys->aout_cond, &p_sys->lock, i_wake );
++    }
++}
++
+ static void
+ Flush( audio_output_t *p_aout, bool b_wait )
+ {
+@@ -2026,6 +2071,8 @@ Flush( audio_output_t *p_aout, bool b_wait )
+         if( p_sys->b_error )
+             goto bailout;
+ 
++        AudioTrack_WaitPlayed( env, p_aout );
++
+         JNI_AT_CALL_VOID( stop );
+         if( CHECK_AT_EXCEPTION( "stop" ) )
+             goto bailout;
+-- 
+2.55.0
+
