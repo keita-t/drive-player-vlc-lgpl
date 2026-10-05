@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-5 | `libvlc-lgpl-3.7.6-5` |
 | 3.7.6-4 | `libvlc-lgpl-3.7.6-4` |
 | 3.7.6-3 | `libvlc-lgpl-3.7.6-3` |
 | 3.7.6-2 | `libvlc-lgpl-3.7.6-2` |
@@ -76,6 +77,15 @@ input has paused, so an Ogg track (Vorbis, Opus) played the start it had buffere
 - `patches/vlc/0005-es_out-start-a-decoder-made-while-the-input-is-pause.patch`: a decoder made while the
   input is paused starts paused, as `input_DecoderChangePause`'s FIXME describes for a track added while
   paused.
+
+Audio output initialization can miss the converted deadline of the first PCM buffer. The
+original late-buffer policy then discarded the beginning of the media before the output had played
+anything:
+
+- `patches/vlc/0006-retain-pcm-at-delayed-audio-start.patch`: retain and retime the first buffer after
+  output creation, restart or flush, and delay the shared input clock using its original stream
+  timestamp. Pause is accounted for under the clock lock, and a flushing decoder does not rebase a
+  seek from an in-flight buffer. Ordinary late buffers during playback retain the original drop policy.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
