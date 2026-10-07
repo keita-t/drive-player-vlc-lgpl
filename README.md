@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-8 | `libvlc-lgpl-3.7.6-8` |
 | 3.7.6-7 | `libvlc-lgpl-3.7.6-7` |
 | 3.7.6-6 | `libvlc-lgpl-3.7.6-6` |
 | 3.7.6-5 | `libvlc-lgpl-3.7.6-5` |
@@ -106,6 +107,13 @@ picture creates extra black bars:
   dimensions separately from coded dimensions, use them for initial opaque output and for missing or
   invalid crop fields when they fit the output buffer, and update them when the SPS changes. Valid
   decoder crop rectangles remain authoritative.
+
+Program and transport streams can identify video tracks before the decoder learns their dimensions
+and pixel aspect. Reading parsed-media metadata early would then cache zero dimensions:
+
+- `patches/libvlcjni/0004-expose-current-input-track-formats.patch`: expose
+  `IMedia.getTracksSnapshot()` to read current native input formats, including visible dimensions,
+  pixel aspect and orientation discovered during decoding. Parsed-media metadata keeps its cache.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and

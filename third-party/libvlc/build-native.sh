@@ -29,7 +29,8 @@
 #    and the app's track changes need (an output that plays a stream to its end before reporting it,
 #    a decoder made while its input is paused that waits paused, and the first PCM retained
 #    with the shared clock delayed when audio output initialization misses its deadline), and
-#    the surface lifecycle needs (cancelled initialization and callback thread teardown).
+#    the surface lifecycle needs (cancelled initialization and callback thread teardown), and
+#    live video sizing needs (fresh input track formats after decoder initialization).
 # When the pin moves, diff upstream's compile-libvlc.sh between the two commits and carry what
 # changed over to this script.
 

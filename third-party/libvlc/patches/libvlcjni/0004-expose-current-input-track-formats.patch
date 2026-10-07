@@ -1,0 +1,59 @@
+From: Drive Player <drive-player@localhost>
+Date: Wed, 7 Oct 2026 19:00:00 +0900
+Subject: [PATCH] Expose a fresh snapshot of the input track formats
+
+Program and transport streams identify their tracks before their video
+dimensions are known. Media's cached snapshot then retains zero dimensions
+even after the decoder updates the native input item. Let a live output
+read that updated snapshot without changing parsed-media metadata caching.
+---
+diff --git a/libvlc/src/org/videolan/libvlc/Media.java b/libvlc/src/org/videolan/libvlc/Media.java
+--- a/libvlc/src/org/videolan/libvlc/Media.java
++++ b/libvlc/src/org/videolan/libvlc/Media.java
+@@ -401,6 +401,18 @@
+             mNativeTracks = tracks;
+             return mNativeTracks;
+         }
++    }
++
++    /**
++     * Get a fresh snapshot of the input's tracks, including dimensions and pixel aspect
++     * learned by the decoder after the tracks were first identified. Unlike getTrack(),
++     * this does not reuse the metadata snapshot retained for a parsed media.
++     *
++     * @return the current tracks, or null when unavailable or released
++     */
++    @Override
++    public synchronized Track[] getTracksSnapshot() {
++        return isReleased() ? null : nativeGetTracks();
+     }
+ 
+     /**
+diff --git a/libvlc/src/org/videolan/libvlc/interfaces/IMedia.java b/libvlc/src/org/videolan/libvlc/interfaces/IMedia.java
+--- a/libvlc/src/org/videolan/libvlc/interfaces/IMedia.java
++++ b/libvlc/src/org/videolan/libvlc/interfaces/IMedia.java
+@@ -356,6 +356,9 @@
+ 
+     int getType();
+ 
++    /** A fresh snapshot, including track formats discovered during decoding. */
++    Track[] getTracksSnapshot();
++
+     int getTrackCount();
+ 
+     Track getTrack(int idx);
+diff --git a/libvlc/src/org/videolan/libvlc/stubs/StubMedia.java b/libvlc/src/org/videolan/libvlc/stubs/StubMedia.java
+--- a/libvlc/src/org/videolan/libvlc/stubs/StubMedia.java
++++ b/libvlc/src/org/videolan/libvlc/stubs/StubMedia.java
+@@ -75,6 +75,11 @@
+     @Override
+     public int getType() {
+         return mType;
++    }
++
++    @Override
++    public Track[] getTracksSnapshot() {
++        return null;
+     }
+ 
+     @Override
