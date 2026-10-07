@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000007 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 7 Oct 2026 16:00:00 +0900
+Subject: [PATCH] mediacodec: retain visible dimensions when crop keys are absent
+
+NDK decoders can report a macroblock-aligned output buffer without crop
+keys. SurfaceTexture already applies the actual crop, but using the padded
+size as the display aspect adds black bars or shrinks the visible picture.
+
+Keep input/SPS visible dimensions separately from coded dimensions, including
+SPS changes. Use them for the initial opaque output and as the fallback for
+missing or invalid crop keys when they fit within the reported buffer.
+Valid decoder crop rectangles remain authoritative.
+
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 68e968e..827be86 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -114,6 +114,7 @@ struct decoder_sys_t
+             void *p_surface, *p_jsurface;
+             unsigned i_angle;
+             unsigned i_input_width, i_input_height;
++            unsigned i_visible_width, i_visible_height;
+             unsigned int i_stride, i_slice_height;
+             int i_pixel_format;
+             struct hxxx_helper hh;
+@@ -258,9 +259,13 @@ static void HXXXInitSize(decoder_t *p_dec, bool *p_size_changed)
+         hxxx_helper_get_current_picture_size(hh, &i_w, &i_h, &i_vw, &i_vh);
+ 
+         *p_size_changed = (i_w != p_sys->video.i_input_width
+-                        || i_h != p_sys->video.i_input_height);
++                        || i_h != p_sys->video.i_input_height
++                        || i_vw != p_sys->video.i_visible_width
++                        || i_vh != p_sys->video.i_visible_height);
+         p_sys->video.i_input_width = i_w;
+         p_sys->video.i_input_height = i_h;
++        p_sys->video.i_visible_width = i_vw;
++        p_sys->video.i_visible_height = i_vh;
+         /* fmt_out video size will be updated by mediacodec output callback */
+     }
+ }
+@@ -762,10 +767,16 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
+                 p_dec->fmt_out.video.i_sar_den = 1;
+             }
+ 
+-            p_sys->video.i_input_width =
+-            p_dec->fmt_out.video.i_visible_width = p_dec->fmt_out.video.i_width;
+-            p_sys->video.i_input_height =
+-            p_dec->fmt_out.video.i_visible_height = p_dec->fmt_out.video.i_height;
++            p_sys->video.i_input_width = p_dec->fmt_out.video.i_width;
++            p_sys->video.i_input_height = p_dec->fmt_out.video.i_height;
++            p_sys->video.i_visible_width = p_dec->fmt_out.video.i_visible_width;
++            p_sys->video.i_visible_height = p_dec->fmt_out.video.i_visible_height;
++            /* SurfaceTexture applies the decoder's crop. The opaque picture's
++             * dimensions describe those visible pixels, not coded padding. */
++            if (p_sys->video.i_visible_width > 0)
++                p_dec->fmt_out.video.i_width = p_sys->video.i_visible_width;
++            if (p_sys->video.i_visible_height > 0)
++                p_dec->fmt_out.video.i_height = p_sys->video.i_visible_height;
+ 
+             if (UpdateVout(p_dec) != VLC_SUCCESS)
+             {
+@@ -1072,10 +1083,18 @@ static int Video_ProcessOutput(decoder_t *p_dec, mc_api_out *p_out,
+             i_width = p_out->conf.video.width;
+             i_height = p_out->conf.video.height;
+         }
+-        if (i_width <= 1 || i_height <= 1)
++        if (!valid_crop || i_width <= 1 || i_height <= 1)
+         {
+-            i_width = p_out->conf.video.width;
+-            i_height = p_out->conf.video.height;
++            /* Some NDK decoders omit crop keys. Their buffers can be padded,
++             * while SurfaceTexture still crops correctly. Prefer the visible
++             * dimensions from the input/SPS when they fit the output buffer. */
++            unsigned i_vw = p_sys->video.i_visible_width;
++            unsigned i_vh = p_sys->video.i_visible_height;
++            bool known_visible = i_vw > 1 && i_vh > 1
++                && i_vw <= (unsigned) p_out->conf.video.width
++                && i_vh <= (unsigned) p_out->conf.video.height;
++            i_width = known_visible ? i_vw : p_out->conf.video.width;
++            i_height = known_visible ? i_vh : p_out->conf.video.height;
+             valid_crop = false;
+         }
+ 

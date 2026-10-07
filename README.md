@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-7 | `libvlc-lgpl-3.7.6-7` |
 | 3.7.6-6 | `libvlc-lgpl-3.7.6-6` |
 | 3.7.6-5 | `libvlc-lgpl-3.7.6-5` |
 | 3.7.6-4 | `libvlc-lgpl-3.7.6-4` |
@@ -96,6 +97,15 @@ unattached callback loopers were also left alive:
   together, cancel pending initialization on detach, keep old waiters from acquiring a new
   attachment's resources, defer attached texture release to its GL owner, and join the callback
   thread without holding its monitor.
+
+Some Android MediaCodec decoders report macroblock-aligned buffer dimensions without crop fields,
+while their SurfaceTexture still applies the correct crop. Using those padded dimensions to fit the
+picture creates extra black bars:
+
+- `patches/vlc/0007-mediacodec-retain-visible-dimensions-without-crop.patch`: keep input/SPS visible
+  dimensions separately from coded dimensions, use them for initial opaque output and for missing or
+  invalid crop fields when they fit the output buffer, and update them when the SPS changes. Valid
+  decoder crop rectangles remain authoritative.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
