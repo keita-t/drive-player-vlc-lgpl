@@ -28,7 +28,8 @@
 #  - patches/: the few source changes the LGPL-only result needs, the app's callback input needs,
 #    and the app's track changes need (an output that plays a stream to its end before reporting it,
 #    a decoder made while its input is paused that waits paused, and the first PCM retained
-#    with the shared clock delayed when audio output initialization misses its deadline).
+#    with the shared clock delayed when audio output initialization misses its deadline), and
+#    the surface lifecycle needs (cancelled initialization and callback thread teardown).
 # When the pin moves, diff upstream's compile-libvlc.sh between the two commits and carry what
 # changed over to this script.
 

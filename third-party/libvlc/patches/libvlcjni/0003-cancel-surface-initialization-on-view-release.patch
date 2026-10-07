@@ -1,0 +1,259 @@
+From 8e088be577dfae0626cb5555ac3ddd789053a662 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Wed, 7 Oct 2026 09:08:44 +0900
+Subject: [PATCH] Cancel surface initialization when views are released
+
+Publish SurfaceTexture and Surface together before waking their creator. A view detach cancels pending initialization; the initialization thread identifies its attachment so an old waiter cannot acquire a new surface after reattachment.
+
+Quit the callback looper and release unattached resources even when creation is pending. Defer release of an attached texture to its GL owner and join the callback thread outside its monitor, allowing pending callbacks or cancelled initialization to finish.
+---
+ libvlc/src/org/videolan/libvlc/AWindow.java | 171 +++++++++++++-------
+ 1 file changed, 112 insertions(+), 59 deletions(-)
+
+diff --git a/libvlc/src/org/videolan/libvlc/AWindow.java b/libvlc/src/org/videolan/libvlc/AWindow.java
+index 970e8ba..16eec72 100644
+--- a/libvlc/src/org/videolan/libvlc/AWindow.java
++++ b/libvlc/src/org/videolan/libvlc/AWindow.java
+@@ -317,6 +317,7 @@ public class AWindow implements IVLCVout {
+         if (mSurfacesState.get() != SURFACE_STATE_INIT || mSurfaceHelpers[ID_VIDEO] == null)
+             throw new IllegalStateException("already attached or video view not configured");
+         mSurfacesState.set(SURFACE_STATE_ATTACHED);
++        mSurfaceTextureThread.onViewsAttached();
+         synchronized (mNativeLock) {
+             mOnNewVideoLayoutListener = onNewVideoLayoutListener;
+             mNativeLock.buffersGeometryConfigured = false;
+@@ -580,28 +581,31 @@ public class AWindow implements IVLCVout {
+         private Thread mThread = null;
+         private boolean mIsAttached = false;
+         private boolean mDoRelease = false;
++        private boolean mReleased = true;
+ 
+-        private SurfaceTextureThread() {
++        private synchronized void onViewsAttached() {
++            mReleased = false;
+         }
+ 
+         private synchronized boolean createSurface() {
+-            /* Try to re-use the same SurfaceTexture until views are detached. By reusing the same
+-             * SurfaceTexture, we don't have to reconfigure MediaCodec when it signals a video size
+-             * change (and when a new VLC vout is created) */
+-            if (mSurfaceTexture == null) {
+-                /* Yes, a new Thread, see comments in the run method */
++            if (mReleased || mDoRelease)
++                return false;
++            /* Reuse the decoder's SurfaceTexture until views are detached. The thread identifies
++             * this initialization: a cancelled waiter must not acquire a later attachment's surface. */
++            if (mSurface == null && mThread == null) {
+                 mThread = new Thread(this);
+                 mThread.start();
+-                while (mSurfaceTexture == null) {
+-                    try {
+-                        wait();
+-                    } catch (InterruptedException ignored) {
+-                        return false;
+-                    }
++            }
++            final Thread thread = mThread;
++            while (mSurface == null && !mReleased && mThread == thread) {
++                try {
++                    wait();
++                } catch (InterruptedException ignored) {
++                    Thread.currentThread().interrupt();
++                    return false;
+                 }
+-                mSurface = new Surface(mSurfaceTexture);
+             }
+-            return true;
++            return !mReleased && !mDoRelease && mThread == thread && mSurface != null;
+         }
+ 
+         private synchronized boolean attachToGLContext(int texName) {
+@@ -615,61 +619,66 @@ public class AWindow implements IVLCVout {
+ 
+         @Override
+         public synchronized void onFrameAvailable(SurfaceTexture surfaceTexture) {
+-            if (surfaceTexture == mSurfaceTexture) {
++            if (surfaceTexture == mSurfaceTexture && !mReleased && !mDoRelease) {
+                 if (mFrameAvailable)
+                     throw new IllegalStateException("An available frame was not updated");
+                 mFrameAvailable = true;
+-                notify();
++                notifyAll();
+             }
+         }
+ 
+         @Override
+         public void run() {
+             Looper.prepare();
+-
++            final Looper looper = Looper.myLooper();
+             synchronized (this) {
+-                /* Ideally, all devices are running Android O, and we can create a SurfaceTexture
+-                 * without an OpenGL context and we can specify the thread (Handler) where to run
+-                 * SurfaceTexture callbacks. But this is not the case. The SurfaceTexture has to be
+-                 * created from a new thread with a prepared looper in order to don't use the
+-                 * MainLooper one (and have deadlock when we stop VLC from the mainloop).
+-                 */
+-                mLooper = Looper.myLooper();
+-                mSurfaceTexture = new SurfaceTexture(0);
+-                /* The OpenGL texture will be attached from the OpenGL Thread */
+-                mSurfaceTexture.detachFromGLContext();
+-                mSurfaceTexture.setOnFrameAvailableListener(this);
+-                notify();
++                if (mReleased || mThread != Thread.currentThread()) {
++                    looper.quit();
++                    return;
++                }
++                /* A dedicated prepared looper keeps frame callbacks off the main thread, which
++                 * may be joining VLC's input thread. Publish the texture and its Surface together:
++                 * release must never see a texture whose Surface has not yet been constructed. */
++                SurfaceTexture texture = null;
++                try {
++                    texture = new SurfaceTexture(0);
++                    texture.detachFromGLContext();
++                    texture.setOnFrameAvailableListener(this);
++                    mSurface = new Surface(texture);
++                    mSurfaceTexture = texture;
++                    mLooper = looper;
++                } catch (RuntimeException | Error failure) {
++                    if (texture != null)
++                        texture.release();
++                    mThread = null;
++                    looper.quit();
++                    throw failure;
++                } finally {
++                    notifyAll();
++                }
+             }
+-
+             Looper.loop();
+         }
+ 
+-        private synchronized void detachFromGLContext() {
+-            if (mDoRelease) {
+-                mLooper.quit();
+-                mLooper = null;
+-
+-                try {
+-                    mThread.join();
+-                } catch (InterruptedException ignored) {
++        private void detachFromGLContext() {
++            final Thread thread;
++            synchronized (this) {
++                if (mDoRelease)
++                    thread = releaseSurface();
++                else {
++                    if (mSurfaceTexture != null)
++                        mSurfaceTexture.detachFromGLContext();
++                    thread = null;
+                 }
+-                mThread = null;
+-
+-                mSurface.release();
+-                mSurface = null;
+-                mSurfaceTexture.release();
+-                mSurfaceTexture = null;
+-                mDoRelease = false;
+-            } else {
+-                mSurfaceTexture.detachFromGLContext();
++                mIsAttached = false;
+             }
+-            mIsAttached = false;
++            join(thread);
+         }
+ 
+         private boolean waitAndUpdateTexImage(float[] transformMatrix) {
++            final SurfaceTexture texture;
+             synchronized (this) {
+-                while (!mFrameAvailable) {
++                while (!mFrameAvailable && !mReleased && !mDoRelease && mSurfaceTexture != null) {
+                     try {
+                         wait(500);
+                         if (!mFrameAvailable)
+@@ -677,10 +686,15 @@ public class AWindow implements IVLCVout {
+                     } catch (InterruptedException ignored) {
+                     }
+                 }
++                if (mReleased || mDoRelease || mSurfaceTexture == null)
++                    return false;
+                 mFrameAvailable = false;
++                texture = mSurfaceTexture;
+             }
+-            mSurfaceTexture.updateTexImage();
+-            mSurfaceTexture.getTransformMatrix(transformMatrix);
++            /* The GL owner serializes image updates with detachFromGLContext. An attached texture
++             * is only released there; a view detach merely requests that deferred release. */
++            texture.updateTexImage();
++            texture.getTransformMatrix(transformMatrix);
+             return true;
+         }
+ 
+@@ -690,18 +704,57 @@ public class AWindow implements IVLCVout {
+             return mSurface;
+         }
+ 
+-        private synchronized void release() {
+-            if (mSurfaceTexture != null) {
++        private void release() {
++            final Thread thread;
++            synchronized (this) {
++                mReleased = true;
++                notifyAll();
+                 if (mIsAttached) {
+-                    /* Release from detachFromGLContext */
++                    /* Release on the GL owner when it detaches its context. */
+                     mDoRelease = true;
+-                } else {
+-                    mSurface.release();
+-                    mSurface = null;
+-                    mSurfaceTexture.release();
+-                    mSurfaceTexture = null;
++                    return;
++                }
++                thread = releaseSurface();
++            }
++            join(thread);
++        }
++
++        /* Called with this monitor held. Cancellation also clears an unpublished initialization,
++         * so its callback thread cannot publish resources after views have been detached. */
++        private Thread releaseSurface() {
++            final Thread thread = mThread;
++            if (mLooper != null)
++                mLooper.quit();
++            mLooper = null;
++            mThread = null;
++            if (mSurface != null)
++                mSurface.release();
++            mSurface = null;
++            if (mSurfaceTexture != null)
++                mSurfaceTexture.release();
++            mSurfaceTexture = null;
++            mFrameAvailable = false;
++            mDoRelease = false;
++            notifyAll();
++            return thread;
++        }
++
++        private static void join(Thread thread) {
++            if (thread == null || thread == Thread.currentThread())
++                return;
++            /* A frame callback or a cancelled initializer may still need the monitor. Never hold
++             * it while joining the looper thread, or native teardown can deadlock with that callback. */
++            boolean interrupted = false;
++            for (;;) {
++                try {
++                    thread.join();
++                    break;
++                } catch (InterruptedException ignored) {
++                    interrupted = true;
+                 }
+             }
++            if (interrupted)
++                Thread.currentThread().interrupt();
+         }
+     }
+ 
+-- 
+2.55.0
+

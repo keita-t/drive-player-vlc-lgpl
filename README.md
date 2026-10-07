@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-6 | `libvlc-lgpl-3.7.6-6` |
 | 3.7.6-5 | `libvlc-lgpl-3.7.6-5` |
 | 3.7.6-4 | `libvlc-lgpl-3.7.6-4` |
 | 3.7.6-3 | `libvlc-lgpl-3.7.6-3` |
@@ -86,6 +87,15 @@ anything:
   output creation, restart or flush, and delay the shared input clock using its original stream
   timestamp. Pause is accounted for under the clock lock, and a flushing decoder does not rebase a
   seek from an in-flight buffer. Ordinary late buffers during playback retain the original drop policy.
+
+Detaching views can race the Java binding's internal texture initialization. The texture and its
+Surface were published separately, so release could dereference a not-yet-constructed Surface;
+unattached callback loopers were also left alive:
+
+- `patches/libvlcjni/0003-cancel-surface-initialization-on-view-release.patch`: publish both resources
+  together, cancel pending initialization on detach, keep old waiters from acquiring a new
+  attachment's resources, defer attached texture release to its GL owner, and join the callback
+  thread without holding its monitor.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
