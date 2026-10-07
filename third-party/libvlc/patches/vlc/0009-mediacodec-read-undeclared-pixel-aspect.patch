@@ -1,0 +1,36 @@
+From: Drive Player <drive-player@localhost>
+Date: Wed, 7 Oct 2026 23:00:00 +0900
+Subject: [PATCH] Read the H.26x pixel aspect when the input did not declare one
+
+MediaCodec requests an opaque output before parsing its codec configuration.
+An input with dimensions but no declared SAR starts that output at 1:1.
+The decoded output format does not supply a replacement SAR. Use the H.26x
+helper's current SPS when updating the output, while preserving any aspect
+ratio declared by the container. This also avoids depending on a decoder
+restart when the packetizer later discovers the same picture dimensions.
+---
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -455,6 +455,21 @@ static int UpdateVout(decoder_t *p_dec)
+         p_dec->fmt_out.video.i_sar_den =
+             p_sys->video.i_mpeg_dar_den * p_dec->fmt_out.video.i_width;
+     }
++    else if ((p_dec->fmt_in.i_codec == VLC_CODEC_H264 ||
++              p_dec->fmt_in.i_codec == VLC_CODEC_HEVC) &&
++             (!p_dec->fmt_in.video.i_sar_num || !p_dec->fmt_in.video.i_sar_den))
++    {
++        /* The opaque output is created before codec extra data is parsed.
++         * MediaCodec's output format omits SAR; fill an undeclared aspect
++         * from the current SPS once that configuration is available. */
++        int num, den;
++        if (hxxx_helper_get_current_sar(&p_sys->video.hh, &num, &den) == VLC_SUCCESS
++         && num > 0 && den > 0)
++        {
++            p_dec->fmt_out.video.i_sar_num = num;
++            p_dec->fmt_out.video.i_sar_den = den;
++        }
++    }
+ 
+     /* If MediaCodec can handle the rotation, reset the orientation to
+      * Normal in order to ask the vout not to rotate. */

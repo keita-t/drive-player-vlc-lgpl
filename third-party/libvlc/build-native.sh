@@ -30,7 +30,9 @@
 #    a decoder made while its input is paused that waits paused, and the first PCM retained
 #    with the shared clock delayed when audio output initialization misses its deadline), and
 #    the surface lifecycle needs (cancelled initialization and callback thread teardown), and
-#    live video sizing needs (fresh input track formats after decoder initialization).
+#    live video sizing needs (fresh input track formats after decoder initialization,
+#    Matroska display aspect ratios converted to pixel aspect in the stated direction, and
+#    undeclared H.26x pixel aspect read from the current SPS by MediaCodec).
 # When the pin moves, diff upstream's compile-libvlc.sh between the two commits and carry what
 # changed over to this script.
 

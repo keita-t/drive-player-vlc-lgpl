@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-9 | `libvlc-lgpl-3.7.6-9` |
 | 3.7.6-8 | `libvlc-lgpl-3.7.6-8` |
 | 3.7.6-7 | `libvlc-lgpl-3.7.6-7` |
 | 3.7.6-6 | `libvlc-lgpl-3.7.6-6` |
@@ -114,6 +115,19 @@ and pixel aspect. Reading parsed-media metadata early would then cache zero dime
 - `patches/libvlcjni/0004-expose-current-input-track-formats.patch`: expose
   `IMedia.getTracksSnapshot()` to read current native input formats, including visible dimensions,
   pixel aspect and orientation discovered during decoding. Parsed-media metadata keeps its cache.
+
+Matroska's display aspect ratio uses the same width-to-height direction as pixel display units:
+
+- `patches/vlc/0008-mkv-preserve-display-aspect-ratio.patch`: divide the declared display aspect by
+  the visible picture aspect for `DisplayUnit=3`, instead of inverting the pixel aspect. A 384x288
+  picture displayed as 16:9 has SAR 4:3, not 3:4.
+
+MediaCodec's output format omits pixel aspect. An H.26x input whose container does not declare it
+can therefore retain the opaque output's initial square pixels:
+
+- `patches/vlc/0009-mediacodec-read-undeclared-pixel-aspect.patch`: read the current H.264/HEVC SPS
+  when updating an output whose input did not specify pixel aspect. A container's declared ratio
+  remains authoritative.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and

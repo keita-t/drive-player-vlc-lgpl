@@ -1,0 +1,30 @@
+From: Drive Player <drive-player@localhost>
+Date: Wed, 7 Oct 2026 21:00:00 +0900
+Subject: [PATCH] Keep Matroska display aspect units in the stated direction
+
+DisplayUnit 3 makes DisplayWidth and DisplayHeight the display aspect
+ratio. Like the other known units, their ratio must be divided by the
+visible picture's ratio to obtain the pixel aspect, not inverted. A
+384x288 picture with a 16:9 display ratio needs SAR 4:3, not 3:4.
+---
+diff --git a/modules/demux/mkv/matroska_segment_parse.cpp b/modules/demux/mkv/matroska_segment_parse.cpp
+--- a/modules/demux/mkv/matroska_segment_parse.cpp
++++ b/modules/demux/mkv/matroska_segment_parse.cpp
+@@ -556,15 +556,12 @@
+                     case 0: // pixels
+                     case 1: // centimeters
+                     case 2: // inches
++                    case 3: // display aspect ratio
++                        // SAR = display aspect / visible picture aspect, for every known unit.
+                         vlc_ureduce( &tk->fmt.video.i_sar_num, &tk->fmt.video.i_sar_den,
+                                      i_display_width * tk->fmt.video.i_visible_height,
+                                      i_display_height * tk->fmt.video.i_visible_width, 0);
+                         break;
+-                    case 3: // display aspect ratio
+-                        vlc_ureduce( &tk->fmt.video.i_sar_num, &tk->fmt.video.i_sar_den,
+-                                     i_display_height * tk->fmt.video.i_visible_width,
+-                                     i_display_width * tk->fmt.video.i_visible_height, 0);
+-                        break;
+                 }
+             }
+         }
