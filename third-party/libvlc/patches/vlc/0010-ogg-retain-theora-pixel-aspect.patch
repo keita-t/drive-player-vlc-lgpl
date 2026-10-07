@@ -1,0 +1,23 @@
+From: Drive Player <drive-player@localhost>
+Date: Thu, 8 Oct 2026 00:00:00 +0900
+Subject: [PATCH] Retain Theora pixel aspect from the Ogg identification header
+
+The header probe consumed but discarded Theora's aspect numerator and
+denominator. A decoder relying on the demux format then produced square
+pixels even when the source declared non-square pixels. Keep both fields
+in the elementary stream format so the first output has the declared SAR.
+---
+diff --git a/modules/demux/ogg.c b/modules/demux/ogg.c
+--- a/modules/demux/ogg.c
++++ b/modules/demux/ogg.c
+@@ -2682,8 +2682,8 @@ static bool Ogg_ReadTheoraHeader( logical_stream_t *p_stream,
+     i_fps_numerator = bs_read( &bitstream, 32 );
+     i_fps_denominator = bs_read( &bitstream, 32 );
+     i_fps_denominator = __MAX( i_fps_denominator, 1 );
+-    bs_read( &bitstream, 24 ); /* aspect_numerator */
+-    bs_read( &bitstream, 24 ); /* aspect_denominator */
++    p_stream->fmt.video.i_sar_num = bs_read( &bitstream, 24 );
++    p_stream->fmt.video.i_sar_den = bs_read( &bitstream, 24 );
+ 
+     p_stream->fmt.video.i_frame_rate = i_fps_numerator;
+     p_stream->fmt.video.i_frame_rate_base = i_fps_denominator;

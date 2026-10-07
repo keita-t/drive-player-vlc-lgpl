@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-10 | `libvlc-lgpl-3.7.6-10` |
 | 3.7.6-9 | `libvlc-lgpl-3.7.6-9` |
 | 3.7.6-8 | `libvlc-lgpl-3.7.6-8` |
 | 3.7.6-7 | `libvlc-lgpl-3.7.6-7` |
@@ -128,6 +129,12 @@ can therefore retain the opaque output's initial square pixels:
 - `patches/vlc/0009-mediacodec-read-undeclared-pixel-aspect.patch`: read the current H.264/HEVC SPS
   when updating an output whose input did not specify pixel aspect. A container's declared ratio
   remains authoritative.
+
+The Ogg identification header contains Theora's pixel aspect, which software decoding needs before
+its first output:
+
+- `patches/vlc/0010-ogg-retain-theora-pixel-aspect.patch`: retain the header's numerator and
+  denominator in the elementary stream format instead of discarding them.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
