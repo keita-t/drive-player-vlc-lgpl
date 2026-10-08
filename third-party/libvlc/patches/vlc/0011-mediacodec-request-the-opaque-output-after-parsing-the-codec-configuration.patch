@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000011 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Thu, 8 Oct 2026 14:00:00 +0900
+Subject: [PATCH] mediacodec: request the opaque output after parsing the codec
+ configuration
+
+The opaque output was requested before the extra data was parsed. An H.264
+or HEVC input that declares no aspect therefore started its output at a
+provisional 1:1, and the input's track format took that value too. The SPS
+aspect (0009) arrived only with MediaCodec's output format update, which can
+reach the window after the first picture: a frame read as soon as it arrives
+was then shaped by the provisional 1:1.
+
+Parse the codec configuration first, so an output whose SPS is in the extra
+data starts with that aspect. Inputs whose parameter sets arrive in band keep
+the previous behaviour.
+---
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 5dbf1f4..f886e9b 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -792,12 +792,8 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
+                 p_dec->fmt_out.video.i_width = p_sys->video.i_visible_width;
+             if (p_sys->video.i_visible_height > 0)
+                 p_dec->fmt_out.video.i_height = p_sys->video.i_visible_height;
+-
+-            if (UpdateVout(p_dec) != VLC_SUCCESS)
+-            {
+-                msg_Err(p_dec, "Opaque Vout request failed");
+-                goto bailout;
+-            }
++            /* The opaque Vout is requested below, once the codec
++             * configuration is parsed. */
+         }
+     }
+     else
+@@ -836,6 +832,18 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
+         }
+     }
+ 
++    /* Request the opaque Vout after the codec configuration is parsed: an
++     * H.264/HEVC input that declares no aspect then starts its output with
++     * the SAR of the SPS in its extra data, rather than with a provisional
++     * 1:1 that is only corrected once MediaCodec reports its output format,
++     * which can be after the first picture reached the surface. */
++    if (p_dec->fmt_out.i_codec == VLC_CODEC_ANDROID_OPAQUE
++     && UpdateVout(p_dec) != VLC_SUCCESS)
++    {
++        msg_Err(p_dec, "Opaque Vout request failed");
++        goto bailout;
++    }
++
+     i_ret = StartMediaCodec(p_dec);
+     if (i_ret != VLC_SUCCESS)
+     {

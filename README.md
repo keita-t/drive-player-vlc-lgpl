@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-11 | `libvlc-lgpl-3.7.6-11` |
 | 3.7.6-10 | `libvlc-lgpl-3.7.6-10` |
 | 3.7.6-9 | `libvlc-lgpl-3.7.6-9` |
 | 3.7.6-8 | `libvlc-lgpl-3.7.6-8` |
@@ -135,6 +136,20 @@ its first output:
 
 - `patches/vlc/0010-ogg-retain-theora-pixel-aspect.patch`: retain the header's numerator and
   denominator in the elementary stream format instead of discarding them.
+
+A video output learns a changed pixel aspect from the pictures it displays, and applies it to the
+window only after displaying them: the aspect it is opened with is the only one the window knows before
+the first picture. MediaCodec opened its opaque output at a provisional 1:1 before it knew the aspect of
+an H.264/HEVC input whose container declares none, or of an MPEG-2 sequence, whose packetizer states
+none:
+
+- `patches/vlc/0011-mediacodec-request-the-opaque-output-after-parsing-the-codec-configuration.patch`:
+  parse the codec configuration before requesting the opaque output, so an output whose SPS is in the
+  extra data opens with that aspect.
+- `patches/vlc/0012-mediacodec-open-the-mpeg-2-opaque-output-with-the-aspect-of-its-first-sequence-header.patch`:
+  for an MPEG-1/2 input that declares no aspect, request the opaque output and start MediaCodec once
+  the first block, which carries the sequence header, is parsed, so the output opens with the aspect it
+  states.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and

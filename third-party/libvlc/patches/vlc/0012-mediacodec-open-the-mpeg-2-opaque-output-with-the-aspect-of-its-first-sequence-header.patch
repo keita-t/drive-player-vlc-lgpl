@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000012 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Thu, 8 Oct 2026 15:30:00 +0900
+Subject: [PATCH] mediacodec: open the MPEG-2 opaque output with the aspect of
+ its first sequence header
+
+A Vout learns a changed aspect from the pictures it displays, and applies it
+to the display only after displaying them: the aspect it is opened with is
+the only one that reaches the window before the first picture. The MPEG-2
+packetizer does not state the aspect of a sequence, so the opaque output was
+opened at a provisional 1:1 and corrected only after a picture, up to a
+second after the first one; the input's track format could also take the
+provisional value. A frame read as soon as it arrives was then shaped by 1:1.
+
+For an MPEG-1/2 input that declares no aspect, request the opaque output and
+start MediaCodec, which renders into it, once the first block is parsed. That
+block carries the sequence header, as the first block of a sequence does, and
+the output opens with the aspect it states; a first block without one starts
+the output as before. A failed start aborts, and the decoder is reloaded.
+---
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index f886e9b..8263fe8 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -105,6 +105,9 @@ struct decoder_sys_t
+     bool            b_aborted;
+     bool            b_drained;
+     bool            b_adaptive;
++    /* The opaque output and MediaCodec wait for the first block, to open the
++     * output with the aspect it states; see OpenDecoder. */
++    bool            b_start_on_first_block;
+     int             i_decode_flags;
+ 
+     union
+@@ -832,23 +835,40 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
+         }
+     }
+ 
+-    /* Request the opaque Vout after the codec configuration is parsed: an
+-     * H.264/HEVC input that declares no aspect then starts its output with
+-     * the SAR of the SPS in its extra data, rather than with a provisional
+-     * 1:1 that is only corrected once MediaCodec reports its output format,
+-     * which can be after the first picture reached the surface. */
++    /* A Vout learns a new aspect from the pictures it displays, after it has
++     * displayed them; only the aspect it is opened with reaches the window
++     * before the first picture. An MPEG-2 sequence states its aspect only in
++     * its sequence header, which the packetizer leaves undeclared and which
++     * arrives with the first block: open the output, and start MediaCodec
++     * that renders into it, once that block is parsed (DecodeBlock). */
+     if (p_dec->fmt_out.i_codec == VLC_CODEC_ANDROID_OPAQUE
+-     && UpdateVout(p_dec) != VLC_SUCCESS)
++     && (p_dec->fmt_in.i_codec == VLC_CODEC_MPGV
++      || p_dec->fmt_in.i_codec == VLC_CODEC_MP2V)
++     && (!p_dec->fmt_in.video.i_sar_num || !p_dec->fmt_in.video.i_sar_den))
+     {
+-        msg_Err(p_dec, "Opaque Vout request failed");
+-        goto bailout;
++        p_sys->b_start_on_first_block = true;
+     }
+-
+-    i_ret = StartMediaCodec(p_dec);
+-    if (i_ret != VLC_SUCCESS)
++    else
+     {
+-        msg_Err(p_dec, "StartMediaCodec failed");
+-        goto bailout;
++        /* Request the opaque Vout after the codec configuration is parsed:
++         * an H.264/HEVC input that declares no aspect then starts its output
++         * with the SAR of the SPS in its extra data, rather than with a
++         * provisional 1:1 that is only corrected once MediaCodec reports its
++         * output format, which can be after the first picture reached the
++         * surface. */
++        if (p_dec->fmt_out.i_codec == VLC_CODEC_ANDROID_OPAQUE
++         && UpdateVout(p_dec) != VLC_SUCCESS)
++        {
++            msg_Err(p_dec, "Opaque Vout request failed");
++            goto bailout;
++        }
++
++        i_ret = StartMediaCodec(p_dec);
++        if (i_ret != VLC_SUCCESS)
++        {
++            msg_Err(p_dec, "StartMediaCodec failed");
++            goto bailout;
++        }
+     }
+ 
+     if (vlc_clone(&p_sys->out_thread, OutThread, p_dec,
+@@ -1649,6 +1669,21 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
+         }
+     }
+ 
++    /* The first block of a deferred MPEG-2 start has been parsed: it states
++     * the aspect when it carries the sequence header, as the first block of
++     * a sequence does; otherwise the output starts as it would have. */
++    if (p_sys->b_start_on_first_block)
++    {
++        p_sys->b_start_on_first_block = false;
++        if (UpdateVout(p_dec) != VLC_SUCCESS
++         || StartMediaCodec(p_dec) != VLC_SUCCESS)
++        {
++            msg_Err(p_dec, "Deferred MediaCodec start failed");
++            AbortDecoderLocked(p_dec);
++            goto end;
++        }
++    }
++
+     /* Abort if MediaCodec is not yet started */
+     if (p_sys->api.b_started)
+         QueueBlockLocked(p_dec, p_in_block, false);
