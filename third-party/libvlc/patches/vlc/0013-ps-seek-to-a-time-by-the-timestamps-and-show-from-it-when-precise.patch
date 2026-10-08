@@ -1,0 +1,318 @@
+From 0000000000000000000000000000000000000013 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Thu, 8 Oct 2026 21:00:00 +0900
+Subject: [PATCH] ps: seek to a time by the timestamps, and show from it when
+ precise
+
+DEMUX_GET_TIME reports a time relative to the time track's first timestamp,
+and the input seeks with such a time, but DEMUX_SET_TIME took that first
+timestamp off it again and moved to that share of the bytes: every seek
+landed early by the stream's start offset, and further off by how unevenly
+the bytes are spread over the time. Search for the time instead, by the
+timestamps of the time track read at the positions the ones known so far
+point to.
+
+A picture is decoded from the key picture before it. A precise seek, which
+the input asks for unless fast seeking is enabled, lands one to two seconds
+before the time and tells the ES output the time to show from: the decoders
+decode from there and show nothing before it, as the MP4 and Matroska
+demuxers do. A time was sought only once a timestamp had been read, so a
+start time took the input's estimate; the length and the time track are
+known before the first packet, so a start time is sought the same way.
+
+FFmpeg writes a pack header only every second at 2 Mb/s, and once one is met
+the demuxer synced only on pack headers: the probe for the last timestamps
+found none in the last 200 kB, the length was left unknown, and the one
+estimated from the mux rate took its units of 50 bytes as bytes, fifty times
+too long. Probe the end and search on any packet, and count the mux rate in
+its units.
+
+Between those pack headers the clock stood still: each packet repeated the
+last pack's SCR as the PCR, so the clock moved in steps of seconds, and
+pictures were dropped as late around them. After a seek it repeated the SCR
+from before the seek until the next pack header. Advance the clock between
+pack headers by the bytes read at the mux rate, and after a seek take it from
+the time track's first timestamp, less how far timestamps lead the clock.
+
+The time reported was the last timestamp read, which runs ahead of the clock
+the pictures are shown by as much as the muxer wrote ahead, most of a second.
+Take that lead off, as measured against the clock when a timestamp is read;
+until then, as the stream starts.
+---
+ modules/demux/mpeg/ps.c | 182 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 174 insertions(+), 8 deletions(-)
+
+diff --git a/modules/demux/mpeg/ps.c b/modules/demux/mpeg/ps.c
+index 95b4b61..a48b2c7 100644
+--- a/modules/demux/mpeg/ps.c
++++ b/modules/demux/mpeg/ps.c
+@@ -95,6 +95,9 @@ struct demux_sys_t
+     int64_t     i_length;
+     int         i_time_track_index;
+     int64_t     i_current_pts;
++    /* How far the timestamps read run ahead of the stream's clock: a muxer
++     * writes each picture ahead of its time, by as much as the decoder buffers */
++    vlc_tick_t  i_scr_lead;
+     uint64_t    i_start_byte;
+     uint64_t    i_lastpack_byte;
+ 
+@@ -214,6 +217,7 @@ static int OpenCommon( vlc_object_t *p_this, bool b_force )
+     p_sys->i_scr_track_id = 0;
+     p_sys->i_length   = i_length;
+     p_sys->i_current_pts = (vlc_tick_t) 0;
++    p_sys->i_scr_lead = 0;
+     p_sys->i_time_track_index = -1;
+     p_sys->i_aob_mlp_count = 0;
+     p_sys->i_start_byte = i_skip;
+@@ -286,7 +290,10 @@ static int Probe( demux_t *p_demux, bool b_end )
+     int i_ret, i_id;
+     block_t *p_pkt;
+ 
+-    i_ret = ps_pkt_resynch( p_demux->s, p_sys->format, p_sys->b_have_pack );
++    /* A muxer may write a pack header only every few hundred packets (FFmpeg
++     * writes one every second at 2 Mb/s): the end of the stream is probed for
++     * timestamps on any packet, not only once a pack header is met. */
++    i_ret = ps_pkt_resynch( p_demux->s, p_sys->format, p_sys->b_have_pack && !b_end );
+     if( i_ret < 0 )
+     {
+         return VLC_DEMUXER_EOF;
+@@ -386,9 +393,25 @@ static bool FindLength( demux_t *p_demux )
+             }
+         }
+     }
++
++    /* How far the timestamps lead the clock, until it is measured while reading */
++    if( p_sys->i_time_track_index >= 0 && p_sys->i_first_scr > -1 && p_sys->i_scr_lead == 0 )
++        p_sys->i_scr_lead = __MAX( p_sys->tk[p_sys->i_time_track_index].i_first_pts -
++                                   VLC_TICK_0 - p_sys->i_first_scr, 0 );
+     return true;
+ }
+ 
++/* The stream's clock at byte i_pos: the last pack header's, advanced by the
++ * bytes since at the mux rate, as a muxer writes them */
++static vlc_tick_t PackClock( const demux_sys_t *p_sys, uint64_t i_pos )
++{
++    vlc_tick_t i_clock = p_sys->i_pack_scr;
++    if( p_sys->i_mux_rate > 0 && i_pos > p_sys->i_lastpack_byte )
++        i_clock += CLOCK_FREQ * (int64_t)( i_pos - p_sys->i_lastpack_byte ) /
++                   ( p_sys->i_mux_rate * INT64_C(50) );
++    return i_clock;
++}
++
+ static void NotifyDiscontinuity( ps_track_t *p_tk, es_out_t *out )
+ {
+     bool b_selected;
+@@ -594,12 +617,29 @@ static int Demux( demux_t *p_demux )
+                     p_sys->i_first_scr = -1;
+                 }
+                 else
+-                    es_out_SetPCR( p_demux->out, VLC_TICK_0 + p_sys->i_pack_scr );
++                    /* The clock moves on between pack headers, which a muxer
++                     * may write seconds apart, as far as the bytes read since */
++                    es_out_SetPCR( p_demux->out, VLC_TICK_0 +
++                                   PackClock( p_sys, vlc_stream_Tell( p_demux->s ) ) );
+             }
+ 
+             if( tk->b_configured && tk->es &&
+                 !ps_pkt_parse_pes( VLC_OBJECT(p_demux), p_pkt, tk->i_skip ) )
+             {
++                /* After a seek the clock is unknown until the next pack header,
++                 * which may be seconds on: take it from the time track's
++                 * timestamp, which leads it as it did before */
++                if( p_sys->i_pack_scr < 0 && p_sys->b_have_pack && !p_sys->b_bad_scr &&
++                    p_sys->i_time_track_index >= 0 &&
++                    tk == &p_sys->tk[p_sys->i_time_track_index] &&
++                    p_pkt->i_pts > VLC_TICK_0 + p_sys->i_scr_lead )
++                {
++                    p_sys->i_pack_scr = p_pkt->i_pts - p_sys->i_scr_lead - VLC_TICK_0;
++                    p_sys->i_scr = p_sys->i_pack_scr;
++                    p_sys->i_lastpack_byte = vlc_stream_Tell( p_demux->s );
++                    es_out_SetPCR( p_demux->out, VLC_TICK_0 + p_sys->i_pack_scr );
++                }
++
+                 if( tk->fmt.i_cat == AUDIO_ES || tk->fmt.i_cat == VIDEO_ES )
+                 {
+                     if( !p_sys->b_bad_scr && p_sys->i_pack_scr > 0 && p_pkt->i_pts > 0 &&
+@@ -641,6 +681,9 @@ static int Demux( demux_t *p_demux )
+                 if( (int64_t)p_pkt->i_pts > p_sys->i_current_pts )
+                 {
+                     p_sys->i_current_pts = (int64_t)p_pkt->i_pts;
++                    if( !p_sys->b_bad_scr && p_sys->b_have_pack && p_sys->i_pack_scr >= 0 )
++                        p_sys->i_scr_lead = __MAX( p_sys->i_current_pts - VLC_TICK_0 -
++                            PackClock( p_sys, vlc_stream_Tell( p_demux->s ) ), 0 );
+                 }
+ 
+                 if( tk->i_next_block_flags )
+@@ -674,6 +717,106 @@ static int Demux( demux_t *p_demux )
+ /*****************************************************************************
+  * Control:
+  *****************************************************************************/
++/* How far before a time a precise seek lands: a picture can only be decoded
++ * from the key picture before it, which in a program stream is seldom a
++ * second away. */
++#define PS_SEEK_LEAD CLOCK_FREQ
++/* How far before where it is aimed at a seek may land */
++#define PS_SEEK_TOLERANCE CLOCK_FREQ
++#define PS_SEEK_STEPS 24
++#define PS_SEEK_PROBE_PACKETS 256
++#define PS_SEEK_MIN_RANGE 2048
++
++/* The first timestamp of the time track from byte i_pos on, and where its
++ * packet starts; nothing is sent. VLC_TICK_INVALID when none is found. */
++static vlc_tick_t ReadTimeAt( demux_t *p_demux, uint64_t i_pos, uint64_t *pi_pkt_pos )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++    ps_track_t *tk = &p_sys->tk[p_sys->i_time_track_index];
++
++    if( vlc_stream_Seek( p_demux->s, i_pos ) != VLC_SUCCESS )
++        return VLC_TICK_INVALID;
++
++    for( int i = 0; i < PS_SEEK_PROBE_PACKETS; i++ )
++    {
++        /* Any packet: pack headers may be far apart */
++        int i_ret = ps_pkt_resynch( p_demux->s, p_sys->format, false );
++        if( i_ret < 0 )
++            return VLC_TICK_INVALID;
++        if( i_ret == 0 )
++            continue;
++
++        uint64_t i_pkt_pos = vlc_stream_Tell( p_demux->s );
++        block_t *p_pkt = ps_pkt_read( p_demux->s );
++        if( p_pkt == NULL )
++            return VLC_TICK_INVALID;
++
++        vlc_tick_t i_pts = VLC_TICK_INVALID;
++        int i_id = ps_pkt_id( p_pkt, p_sys->source );
++        if( i_id >= 0xc0 && &p_sys->tk[ps_id_to_tk(i_id)] == tk &&
++            !ps_pkt_parse_pes( VLC_OBJECT(p_demux), p_pkt, tk->i_skip ) &&
++            p_pkt->i_pts > VLC_TICK_INVALID )
++            i_pts = p_pkt->i_pts;
++        block_Release( p_pkt );
++
++        if( i_pts != VLC_TICK_INVALID )
++        {
++            *pi_pkt_pos = i_pkt_pos;
++            return i_pts;
++        }
++    }
++    return VLC_TICK_INVALID;
++}
++
++/* Move to the packet of the time track whose timestamp is at most i_time, and
++ * at most PS_SEEK_TOLERANCE before it. The bytes of a program stream are not
++ * spread evenly over its time, so the position is searched for by the
++ * timestamps read at the positions the ones known so far point to. */
++static int SeekToTime( demux_t *p_demux, vlc_tick_t i_time )
++{
++    demux_sys_t *p_sys = p_demux->p_sys;
++    const ps_track_t *tk = &p_sys->tk[p_sys->i_time_track_index];
++    const uint64_t i_size = stream_Size( p_demux->s );
++
++    uint64_t i_low = p_sys->i_start_byte, i_high = i_size;
++    vlc_tick_t i_low_time = tk->i_first_pts, i_high_time = tk->i_last_pts;
++    uint64_t i_found = i_low;
++
++    if( i_size <= i_low || i_high_time <= i_low_time )
++        return VLC_EGENERIC;
++
++    bool b_halve = false;
++    for( int i = 0; i < PS_SEEK_STEPS && i_time - i_low_time > PS_SEEK_TOLERANCE &&
++                    i_high > i_low + PS_SEEK_MIN_RANGE; i++ )
++    {
++        /* Aim by the timestamps around; halve the range after a step that
++         * did not, so that an uneven stream still narrows it quickly */
++        const uint64_t i_range = i_high - i_low;
++        double f = b_halve ? 0.5 : (double)( i_time - i_low_time ) / ( i_high_time - i_low_time );
++        f = VLC_CLIP( f, 0.0625, 0.9375 );
++        uint64_t i_pos = i_low + (uint64_t)( i_range * f );
++
++        uint64_t i_pkt_pos;
++        vlc_tick_t i_pts = ReadTimeAt( p_demux, i_pos, &i_pkt_pos );
++        if( i_pts == VLC_TICK_INVALID || i_pts > i_time || i_pkt_pos >= i_high )
++        {
++            i_high = i_pos;
++            if( i_pts != VLC_TICK_INVALID && i_pts > i_time && i_pts < i_high_time )
++                i_high_time = i_pts;
++        }
++        else
++        {
++            i_low = i_found = i_pkt_pos;
++            i_low_time = i_pts;
++        }
++        b_halve = i_high - i_low > i_range / 2;
++    }
++
++    msg_Dbg( p_demux, "time seek lands at byte %"PRIu64", %"PRId64" ms before",
++             i_found, ( i_time - i_low_time ) / 1000 );
++    return vlc_stream_Seek( p_demux->s, i_found );
++}
++
+ static int Control( demux_t *p_demux, int i_query, va_list args )
+ {
+     demux_sys_t *p_sys = p_demux->p_sys;
+@@ -706,6 +849,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             i64 = stream_Size( p_demux->s ) - p_sys->i_start_byte;
+             p_sys->i_current_pts = 0;
+             p_sys->i_scr = -1;
++            p_sys->i_pack_scr = -1;
+ 
+             if( p_sys->format == CDXA_PS )
+             {
+@@ -729,7 +873,9 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             pi64 = va_arg( args, int64_t * );
+             if( p_sys->i_time_track_index >= 0 && p_sys->i_current_pts > 0 )
+             {
+-                *pi64 = p_sys->i_current_pts - p_sys->tk[p_sys->i_time_track_index].i_first_pts;
++                /* The timestamps read lead the clock the pictures are shown by */
++                *pi64 = __MAX( p_sys->i_current_pts - p_sys->i_scr_lead -
++                               p_sys->tk[p_sys->i_time_track_index].i_first_pts, 0 );
+                 return VLC_SUCCESS;
+             }
+             if( p_sys->i_first_scr > -1 && p_sys->i_scr > -1 )
+@@ -755,21 +901,41 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+             }
+             else if( p_sys->i_mux_rate > 0 )
+             {
+-                *pi64 = CLOCK_FREQ * ( stream_Size( p_demux->s ) - p_sys->i_start_byte / 50 ) /
+-                    p_sys->i_mux_rate;
++                /* The mux rate is in units of 50 bytes per second */
++                *pi64 = CLOCK_FREQ * ( stream_Size( p_demux->s ) - p_sys->i_start_byte ) /
++                    ( p_sys->i_mux_rate * INT64_C(50) );
+                 return VLC_SUCCESS;
+             }
+             *pi64 = 0;
+             break;
+ 
+         case DEMUX_SET_TIME:
++        {
+             i64 = va_arg( args, int64_t );
+-            if( p_sys->i_time_track_index >= 0 && p_sys->i_current_pts > 0 && p_sys->i_length )
++            bool b_precise = va_arg( args, int );
++            /* The length and the time track are found before the first packet
++             * is read, so a start time is sought the same way. */
++            if( p_sys->i_time_track_index >= 0 && p_sys->i_length > 0 &&
++                p_sys->b_seekable )
+             {
+-                i64 -= p_sys->tk[p_sys->i_time_track_index].i_first_pts;
+-                return demux_Control( p_demux, DEMUX_SET_POSITION, (double) i64 / p_sys->i_length );
++                /* The time is the one DEMUX_GET_TIME reports, relative to the
++                 * time track's first timestamp. */
++                const vlc_tick_t i_time = p_sys->tk[p_sys->i_time_track_index].i_first_pts + i64;
++                /* A precise seek lands before the key picture preceding the
++                 * time, decodes from there, and shows from the time. */
++                if( SeekToTime( p_demux, b_precise ? i_time - PS_SEEK_LEAD : i_time ) )
++                    break;
++                p_sys->i_current_pts = 0;
++                p_sys->i_scr = -1;
++                p_sys->i_pack_scr = -1;
++                p_sys->b_lost_sync = false;
++                NotifyDiscontinuity( p_sys->tk, p_demux->out );
++                if( b_precise )
++                    es_out_Control( p_demux->out, ES_OUT_SET_NEXT_DISPLAY_TIME, i_time );
++                return VLC_SUCCESS;
+             }
+             break;
++        }
+ 
+         case DEMUX_GET_TITLE_INFO:
+         {

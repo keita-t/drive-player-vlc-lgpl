@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-12 | `libvlc-lgpl-3.7.6-12` |
 | 3.7.6-11 | `libvlc-lgpl-3.7.6-11` |
 | 3.7.6-10 | `libvlc-lgpl-3.7.6-10` |
 | 3.7.6-9 | `libvlc-lgpl-3.7.6-9` |
@@ -150,6 +151,22 @@ none:
   for an MPEG-1/2 input that declares no aspect, request the opaque output and start MediaCodec once
   the first block, which carries the sequence header, is parsed, so the output opens with the aspect it
   states.
+
+The MPEG-PS demuxer took the stream's first timestamp off a time it sought to again, and moved to that
+share of the bytes, so a seek landed early by the stream's start offset and further off by how unevenly the
+bytes spread over the time. Where pack headers are seconds apart, as FFmpeg writes them above about
+0.8 Mb/s, it found no length, held the clock still between them, and after a seek repeated the clock from
+before it. The MPEG-TS demuxer took times from the first PCR, ahead of the first picture by as much as the
+muxer wrote ahead, and a seek landed past the key picture the picture at the time is decoded from:
+
+- `patches/vlc/0013-ps-seek-to-a-time-by-the-timestamps-and-show-from-it-when-precise.patch`: search
+  for a time by the timestamps of the time track; a precise seek, a start time included, lands one to two
+  seconds before it and shows from it; find the length on any packet; advance the clock between pack
+  headers by the bytes at the mux rate, counted in its units of 50 bytes, and take it from a timestamp
+  after a seek; report the time of the clock the pictures are shown by.
+- `patches/vlc/0014-ts-take-times-from-the-first-picture-and-decode-a-precise-seek-from-its-key-picture.patch`:
+  take times from the first picture or sound due; a precise seek lands two seconds earlier by the clock,
+  decodes from there and shows from the time.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
