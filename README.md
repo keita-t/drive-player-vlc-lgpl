@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-15 | `libvlc-lgpl-3.7.6-15` |
 | 3.7.6-14 | `libvlc-lgpl-3.7.6-14` |
 | 3.7.6-13 | `libvlc-lgpl-3.7.6-13` |
 | 3.7.6-12 | `libvlc-lgpl-3.7.6-12` |
@@ -184,9 +185,10 @@ An input queues its requested start-time seek before playback. A software decode
 picture from the beginning during the first demux, before that seek was processed:
 
 - `patches/vlc/0016-input-process-the-start-time-seek-before-demuxing-pictures.patch`: drain the
-  initial queued controls before the first demux when opening has already found the timeline's length.
-  Inputs that discover their timeline during the first demux retain that initial probe. A zero control
-  deadline prevents waiting for a clock before demuxing starts.
+  initial queued controls before the first demux when opening has already found the timeline's length
+  and selected an audio or video stream. Inputs that discover their timeline (MPEG-PS) or create their
+  streams (Ogg) during the first demux retain that initial probe, so an unready seek is not lost.
+  A zero control deadline prevents waiting for a clock before demuxing starts.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
