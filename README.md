@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-17 | `libvlc-lgpl-3.7.6-17` |
 | 3.7.6-15 | `libvlc-lgpl-3.7.6-15` |
 | 3.7.6-14 | `libvlc-lgpl-3.7.6-14` |
 | 3.7.6-13 | `libvlc-lgpl-3.7.6-13` |
@@ -189,6 +190,16 @@ picture from the beginning during the first demux, before that seek was processe
   and selected an audio or video stream. Inputs that discover their timeline (MPEG-PS) or create their
   streams (Ogg) during the first demux retain that initial probe, so an unready seek is not lost.
   A zero control deadline prevents waiting for a clock before demuxing starts.
+
+A video track reselected while paused can handle its pause before a video output exists. The
+later output starts unpaused and may discard the late first picture while the decoder remains paused:
+
+- `patches/vlc/0017-decoder-restore-paused-pictures-after-replacing-the-video-output.patch`:
+  synchronize the current pause when acquiring or reinitializing the video output, serialized with
+  control changes. Track the last handled video pause and wake the decoder for a newer request,
+  avoiding duplicate pause commands and lost changes during asynchronous format updates.
+  Release the FIFO lock before waiting for the video output. Force pictures requested by the existing
+  paused seek/step budget even after buffering ends; preserve preroll, timestamp checks and pause.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and

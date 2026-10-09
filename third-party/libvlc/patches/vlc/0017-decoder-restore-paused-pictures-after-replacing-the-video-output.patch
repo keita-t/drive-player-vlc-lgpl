@@ -1,0 +1,135 @@
+From 81c6998b5070059fc355273dae5c02ae2087ca9d Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Sat, 10 Oct 2026 07:40:36 +0900
+Subject: [PATCH] decoder: restore paused pictures after replacing the video
+ output
+
+A decoder made for a reselected video track can handle its pause
+before its output exists. RequestVout then initializes the new or
+reused output unpaused. The paused seek's frame budget is consumed
+by delivery, but the output discards the late first pictures while
+the decoder stops supplying more input. Play eventually recovers.
+
+Synchronize video pause when acquiring an output and when handling
+control changes, serialized by the decoder owner lock. Track the
+last handled video pause under the FIFO lock, reset it after output
+initialization, and wake the decoder if a newer request arrived during
+the synchronous output call. This avoids duplicate true-to-true pause
+commands and also handles changes during asynchronous format updates.
+Do not hold the FIFO lock while waiting for the video output.
+
+Force pictures requested by the existing paused seek/step budget even
+if buffering has already ended its first-picture wait. Keep preroll,
+stream date validation, pause, clock conversion and that budget intact.
+The input's paused buffering escape remains necessary for progress.
+---
+ src/input/decoder.c | 50 ++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 47 insertions(+), 3 deletions(-)
+
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index 8c20c64..33d7f4b 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -116,6 +116,8 @@ struct decoder_owner_sys_t
+     vlc_tick_t pause_date;
+     unsigned frames_countdown;
+     bool paused;
++    /* Last video pause handled, including without a vout; protected by FIFO. */
++    bool vout_paused;
+ 
+     bool error;
+ 
+@@ -413,6 +415,29 @@ static int aout_update_format( decoder_t *p_dec )
+     return 0;
+ }
+ 
++static void DecoderUpdateVoutPause( decoder_owner_sys_t *p_owner )
++{
++    vlc_assert_locked( &p_owner->lock );
++    vlc_fifo_Lock( p_owner->p_fifo );
++    const bool paused = p_owner->paused;
++    const vlc_tick_t date = p_owner->pause_date;
++    const bool changed = p_owner->vout_paused != paused;
++    vlc_fifo_Unlock( p_owner->p_fifo );
++
++    /* Serialize allocation and control-thread updates. A repeated pause would
++     * offset queued dates as though resuming, and may race a codec callback. */
++    if( p_owner->p_vout != NULL && changed )
++        vout_ChangePause( p_owner->p_vout, paused, date );
++
++    /* Remember the snapshot, so a request that changes during the output
++     * call is handled on the decoder's next iteration. */
++    vlc_fifo_Lock( p_owner->p_fifo );
++    p_owner->vout_paused = paused;
++    if( p_owner->paused != paused )
++        vlc_fifo_Signal( p_owner->p_fifo );
++    vlc_fifo_Unlock( p_owner->p_fifo );
++}
++
+ static int vout_update_format( decoder_t *p_dec )
+ {
+     decoder_owner_sys_t *p_owner = p_dec->p_owner;
+@@ -533,6 +558,13 @@ static int vout_update_format( decoder_t *p_dec )
+         vlc_mutex_lock( &p_owner->lock );
+         p_owner->p_vout = p_vout;
+ 
++        /* RequestVout initializes or reinitializes the output unpaused, even
++         * if the decoder already handled its pause before an output existed. */
++        vlc_fifo_Lock( p_owner->p_fifo );
++        p_owner->vout_paused = false;
++        vlc_fifo_Unlock( p_owner->p_fifo );
++        DecoderUpdateVoutPause( p_owner );
++
+         DecoderUpdateFormatLocked( p_dec );
+         p_owner->fmt.video.i_chroma = p_dec->fmt_out.i_codec;
+         vlc_mutex_unlock( &p_owner->lock );
+@@ -1061,7 +1093,12 @@ static int DecoderPlayVideo( decoder_t *p_dec, picture_t *p_picture,
+      * properly if/when pictures are queued asynchronously. */
+     vlc_fifo_Lock( p_owner->p_fifo );
+     if( unlikely(p_owner->paused) && likely(p_owner->frames_countdown > 0) )
++    {
++        /* Buffering may have stopped waiting before this paused seek/step
++         * picture arrives. It must still be shown without advancing playback. */
++        p_picture->b_force = true;
+         p_owner->frames_countdown--;
++    }
+     vlc_fifo_Unlock( p_owner->p_fifo );
+ 
+     /* */
+@@ -1583,7 +1620,9 @@ static void *DecoderThread( void *p_data )
+             continue;
+         }
+ 
+-        if( paused != p_owner->paused )
++        if( paused != p_owner->paused
++         || ( p_owner->fmt.i_cat == VIDEO_ES
++           && p_owner->vout_paused != p_owner->paused ) )
+         {   /* Update playing/paused status of the output */
+             int canc = vlc_savecancel();
+             vlc_tick_t date = p_owner->pause_date;
+@@ -1593,8 +1632,12 @@ static void *DecoderThread( void *p_data )
+ 
+             /* NOTE: Only the audio and video outputs care about pause. */
+             msg_Dbg( p_dec, "toggling %s", paused ? "resume" : "pause" );
+-            if( p_owner->p_vout != NULL )
+-                vout_ChangePause( p_owner->p_vout, paused, date );
++            if( p_owner->fmt.i_cat == VIDEO_ES )
++            {
++                vlc_mutex_lock( &p_owner->lock );
++                DecoderUpdateVoutPause( p_owner );
++                vlc_mutex_unlock( &p_owner->lock );
++            }
+             if( p_owner->p_aout != NULL )
+                 aout_DecChangePause( p_owner->p_aout, paused, date );
+ 
+@@ -1692,6 +1735,7 @@ static decoder_t * CreateDecoder( vlc_object_t *p_parent,
+     p_owner->p_resource = p_resource;
+     p_owner->p_aout = NULL;
+     p_owner->p_vout = NULL;
++    p_owner->vout_paused = false;
+     p_owner->p_spu_vout = NULL;
+     p_owner->i_spu_channel = 0;
+     p_owner->i_spu_order = 0;
+-- 
+2.55.0
+
