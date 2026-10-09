@@ -2,7 +2,7 @@
 # Gradle Plugin the library is packaged with, and the coordinates it is published under.
 [versions]
 agp = "8.4.0"
-libvlcLgpl = "3.7.6-12"
+libvlcLgpl = "3.7.6-13"
 
 [libraries]
 libvlc-lgpl = { group = "com.example.driveplayer.thirdparty", name = "libvlc-lgpl", version.ref = "libvlcLgpl" }

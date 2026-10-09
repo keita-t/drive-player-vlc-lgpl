@@ -13,18 +13,18 @@ A time seek landed where the clock is at the time, past the key picture the
 picture at the time is decoded from: the first picture shown was the next key
 picture, up to a group of pictures late. A precise seek lands two seconds
 earlier by the clock, decodes from there, and shows from the time.
+
+Probe the last presentation timestamp separately from the last PCR, too:
+the length needs endpoints in the same time domain. If presentation
+endpoints are unavailable, retain the clock span.
+
 ---
- modules/demux/mpeg/ts.c                 | 86 ++++++++++++++++++++++---
- modules/demux/mpeg/ts_streams.c         |  1 +
- modules/demux/mpeg/ts_streams_private.h |  3 +
- 3 files changed, 80 insertions(+), 10 deletions(-)
 
 diff --git a/modules/demux/mpeg/ts.c b/modules/demux/mpeg/ts.c
-index 6baeb47..8f0ab4f 100644
 --- a/modules/demux/mpeg/ts.c
 +++ b/modules/demux/mpeg/ts.c
-@@ -199,6 +199,12 @@ static void ProgramSetPCR( demux_t *p_demux, ts_pmt_t *p_prg, vlc_tick_t i_pcr )
- 
+@@ -199,6 +199,12 @@
+
  static block_t* ReadTSPacket( demux_t *p_demux );
  static int SeekToTime( demux_t *p_demux, const ts_pmt_t *, vlc_tick_t time );
 +static vlc_tick_t TimeOrigin( const ts_pmt_t * );
@@ -36,9 +36,9 @@ index 6baeb47..8f0ab4f 100644
  static void ReadyQueuesPostSeek( demux_t *p_demux );
  static void PCRHandle( demux_t *p_demux, ts_pid_t *, ts_90khz_t );
  static void PCRFixHandle( demux_t *, ts_pmt_t *, block_t * );
-@@ -1003,17 +1009,30 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+@@ -1003,17 +1009,30 @@
          break;
- 
+
      case DEMUX_SET_TIME:
 +    {
          i64 = va_arg( args, int64_t );
@@ -72,11 +72,11 @@ index 6baeb47..8f0ab4f 100644
          }
          break;
 +    }
- 
+
      case DEMUX_GET_TIME:
          pi64 = va_arg( args, int64_t * );
-@@ -1030,7 +1049,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
- 
+@@ -1030,7 +1049,7 @@
+
          if( p_pmt && p_pmt->pcr.i_current != VLC_TICK_INVALID && p_pmt->pcr.i_first != VLC_TICK_INVALID )
          {
 -            *pi64 = p_pmt->pcr.i_current - p_pmt->pcr.i_first;
@@ -84,19 +84,31 @@ index 6baeb47..8f0ab4f 100644
              return VLC_SUCCESS;
          }
          break;
-@@ -1053,7 +1072,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+@@ -1053,11 +1072,19 @@
             ( p_pmt->pcr.i_first != VLC_TICK_INVALID || p_pmt->pcr.i_first_dts != VLC_TICK_INVALID ) &&
               p_pmt->i_last_dts != VLC_TICK_INVALID )
          {
--            vlc_tick_t i_start = (p_pmt->pcr.i_first != VLC_TICK_INVALID) ? p_pmt->pcr.i_first :
-+            vlc_tick_t i_start = (p_pmt->pcr.i_first != VLC_TICK_INVALID) ? TimeOrigin( p_pmt ) :
++            /* The end probe's i_last_dts may be a PCR, so it cannot be
++             * subtracted from the first presentation timestamp. Use both
++             * presentation endpoints when known, otherwise the clock span. */
+             vlc_tick_t i_start = (p_pmt->pcr.i_first != VLC_TICK_INVALID) ? p_pmt->pcr.i_first :
                                    p_pmt->pcr.i_first_dts;
              vlc_tick_t i_last = p_pmt->i_last_dts;
++            if( p_pmt->i_first_pts != VLC_TICK_INVALID && p_pmt->i_last_pts != VLC_TICK_INVALID )
++            {
++                i_start = p_pmt->i_first_pts;
++                i_last = p_pmt->i_last_pts;
++            }
              i_last += p_pmt->pcr.i_pcroffset;
-@@ -1908,6 +1927,18 @@ static void ReadyQueuesPostSeek( demux_t *p_demux )
+-            *pi64 = i_last - i_start;
++            *pi64 = __MAX( i_last - i_start, 0 );
+             return VLC_SUCCESS;
+         }
+         break;
+@@ -1908,6 +1935,18 @@
      }
  }
- 
+
 +/* The origin of the times reported: the first picture or sound due. The
 + * stream's clock starts ahead of it, by as much as the muxer wrote ahead, and a
 + * time from the clock's start would show a picture that much earlier. */
@@ -112,17 +124,20 @@ index 6baeb47..8f0ab4f 100644
  static int SeekToTime( demux_t *p_demux, const ts_pmt_t *p_pmt, vlc_tick_t i_seektime )
  {
      demux_sys_t *p_sys = p_demux->p_sys;
-@@ -2048,6 +2079,41 @@ static int ProbeChunk( demux_t *p_demux, int i_program, bool b_end, ts_90khz_t *
+@@ -2047,6 +2086,48 @@
+
              if( b_adaptfield && p_pkt->i_buffer >= 4 + 2 + 5 )
                  *pi_pcr = GetPCR( p_pkt );
- 
-+            /* The first time a picture or a sound is due, of any program
-+             * stream, read even from a packet that carries a PCR */
-+            if( !b_end &&
++
++            /* Presentation endpoints, independent of the clock endpoints:
++             * even a packet carrying a PCR also has a presentation timestamp.
++             * Subtitles and other data do not extend a program's media span. */
++            if(
 +                (p_pkt->p_buffer[1] & 0xC0) == 0x40 && /* payload start */
 +                (p_pkt->p_buffer[3] & 0xD0) == 0x10 && /* Has payload but is not encrypted */
 +                p_pid->type == TYPE_STREAM &&
-+                p_pid->u.p_stream->p_es->fmt.i_cat != UNKNOWN_ES )
++                (p_pid->u.p_stream->p_es->fmt.i_cat == VIDEO_ES ||
++                 p_pid->u.p_stream->p_es->fmt.i_cat == AUDIO_ES) )
 +            {
 +                unsigned i_skip = 4;
 +                if( b_adaptfield )
@@ -145,38 +160,45 @@ index 6baeb47..8f0ab4f 100644
 +                        vlc_tick_t i_time = FROM_SCALE(i_pts);
 +                        if( p_pmt->pcr.i_first != VLC_TICK_INVALID )
 +                            i_time = TimeStampWrapAround( p_pmt->pcr.i_first, i_time );
-+                        if( p_pmt->i_first_pts == VLC_TICK_INVALID || i_time < p_pmt->i_first_pts )
++                        if( b_end )
++                        {
++                            if( p_pmt->i_last_pts == VLC_TICK_INVALID || i_time > p_pmt->i_last_pts )
++                                p_pmt->i_last_pts = i_time;
++                        }
++                        else if( p_pmt->i_first_pts == VLC_TICK_INVALID || i_time < p_pmt->i_first_pts )
 +                            p_pmt->i_first_pts = i_time;
 +                    }
 +                }
 +            }
-+
+
              if( *pi_pcr == TS_90KHZ_INVALID &&
                  (p_pkt->p_buffer[1] & 0xC0) == 0x40 && /* payload start */
-                 (p_pkt->p_buffer[3] & 0xD0) == 0x10 && /* Has payload but is not encrypted */
+
 diff --git a/modules/demux/mpeg/ts_streams.c b/modules/demux/mpeg/ts_streams.c
-index d850e3c..fe32d66 100644
 --- a/modules/demux/mpeg/ts_streams.c
 +++ b/modules/demux/mpeg/ts_streams.c
-@@ -123,6 +123,7 @@ ts_pmt_t *ts_pmt_New( demux_t *p_demux )
+@@ -123,6 +123,8 @@
      ARRAY_INIT( pmt->od.objects );
- 
+
      pmt->i_last_dts = VLC_TICK_INVALID;
 +    pmt->i_first_pts = VLC_TICK_INVALID;
++    pmt->i_last_pts = VLC_TICK_INVALID;
      pmt->i_last_dts_byte = 0;
- 
+
      pmt->p_atsc_si_basepid      = NULL;
+
 diff --git a/modules/demux/mpeg/ts_streams_private.h b/modules/demux/mpeg/ts_streams_private.h
-index c6a5ab0..30c9cb4 100644
 --- a/modules/demux/mpeg/ts_streams_private.h
 +++ b/modules/demux/mpeg/ts_streams_private.h
-@@ -75,6 +75,9 @@ struct ts_pmt_t
- 
+@@ -75,6 +75,11 @@
+
      vlc_tick_t i_last_dts;
      uint64_t i_last_dts_byte;
 +    /* The first time a picture or a sound is due, ahead of which the stream's
 +     * clock starts: the origin of the times reported */
 +    vlc_tick_t i_first_pts;
- 
++    /* Last media presentation timestamp, not the last PCR used by seeking */
++    vlc_tick_t i_last_pts;
+
      /* ARIB specific */
      struct

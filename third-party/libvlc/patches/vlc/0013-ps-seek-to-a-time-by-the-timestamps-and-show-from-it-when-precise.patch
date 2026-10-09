@@ -38,15 +38,17 @@ The time reported was the last timestamp read, which runs ahead of the clock
 the pictures are shown by as much as the muxer wrote ahead, most of a second.
 Take that lead off, as measured against the clock when a timestamp is read;
 until then, as the stream starts.
+
+Keep the pack clock across PES packets and advance it at the mux rate;
+only a seek invalidates it. PTS are not ordered when B pictures are present,
+so recovering the clock from every PTS would run it backwards.
+
 ---
- modules/demux/mpeg/ps.c | 182 ++++++++++++++++++++++++++++++++++++++--
- 1 file changed, 174 insertions(+), 8 deletions(-)
 
 diff --git a/modules/demux/mpeg/ps.c b/modules/demux/mpeg/ps.c
-index 95b4b61..a48b2c7 100644
 --- a/modules/demux/mpeg/ps.c
 +++ b/modules/demux/mpeg/ps.c
-@@ -95,6 +95,9 @@ struct demux_sys_t
+@@ -95,6 +95,9 @@
      int64_t     i_length;
      int         i_time_track_index;
      int64_t     i_current_pts;
@@ -55,8 +57,8 @@ index 95b4b61..a48b2c7 100644
 +    vlc_tick_t  i_scr_lead;
      uint64_t    i_start_byte;
      uint64_t    i_lastpack_byte;
- 
-@@ -214,6 +217,7 @@ static int OpenCommon( vlc_object_t *p_this, bool b_force )
+
+@@ -214,6 +217,7 @@
      p_sys->i_scr_track_id = 0;
      p_sys->i_length   = i_length;
      p_sys->i_current_pts = (vlc_tick_t) 0;
@@ -64,10 +66,10 @@ index 95b4b61..a48b2c7 100644
      p_sys->i_time_track_index = -1;
      p_sys->i_aob_mlp_count = 0;
      p_sys->i_start_byte = i_skip;
-@@ -286,7 +290,10 @@ static int Probe( demux_t *p_demux, bool b_end )
+@@ -286,7 +290,10 @@
      int i_ret, i_id;
      block_t *p_pkt;
- 
+
 -    i_ret = ps_pkt_resynch( p_demux->s, p_sys->format, p_sys->b_have_pack );
 +    /* A muxer may write a pack header only every few hundred packets (FFmpeg
 +     * writes one every second at 2 Mb/s): the end of the stream is probed for
@@ -76,7 +78,7 @@ index 95b4b61..a48b2c7 100644
      if( i_ret < 0 )
      {
          return VLC_DEMUXER_EOF;
-@@ -386,9 +393,25 @@ static bool FindLength( demux_t *p_demux )
+@@ -386,7 +393,23 @@
              }
          }
      }
@@ -86,8 +88,8 @@ index 95b4b61..a48b2c7 100644
 +        p_sys->i_scr_lead = __MAX( p_sys->tk[p_sys->i_time_track_index].i_first_pts -
 +                                   VLC_TICK_0 - p_sys->i_first_scr, 0 );
      return true;
- }
- 
++}
++
 +/* The stream's clock at byte i_pos: the last pack header's, advanced by the
 + * bytes since at the mux rate, as a muxer writes them */
 +static vlc_tick_t PackClock( const demux_sys_t *p_sys, uint64_t i_pos )
@@ -97,22 +99,22 @@ index 95b4b61..a48b2c7 100644
 +        i_clock += CLOCK_FREQ * (int64_t)( i_pos - p_sys->i_lastpack_byte ) /
 +                   ( p_sys->i_mux_rate * INT64_C(50) );
 +    return i_clock;
-+}
-+
+ }
+
  static void NotifyDiscontinuity( ps_track_t *p_tk, es_out_t *out )
- {
-     bool b_selected;
-@@ -594,12 +617,29 @@ static int Demux( demux_t *p_demux )
+@@ -594,12 +617,31 @@
                      p_sys->i_first_scr = -1;
                  }
                  else
 -                    es_out_SetPCR( p_demux->out, VLC_TICK_0 + p_sys->i_pack_scr );
 +                    /* The clock moves on between pack headers, which a muxer
 +                     * may write seconds apart, as far as the bytes read since */
-+                    es_out_SetPCR( p_demux->out, VLC_TICK_0 +
-+                                   PackClock( p_sys, vlc_stream_Tell( p_demux->s ) ) );
++                {
++                    p_sys->i_scr = PackClock( p_sys, vlc_stream_Tell( p_demux->s ) );
++                    es_out_SetPCR( p_demux->out, VLC_TICK_0 + p_sys->i_scr );
++                }
              }
- 
+
              if( tk->b_configured && tk->es &&
                  !ps_pkt_parse_pes( VLC_OBJECT(p_demux), p_pkt, tk->i_skip ) )
              {
@@ -133,7 +135,7 @@ index 95b4b61..a48b2c7 100644
                  if( tk->fmt.i_cat == AUDIO_ES || tk->fmt.i_cat == VIDEO_ES )
                  {
                      if( !p_sys->b_bad_scr && p_sys->i_pack_scr > 0 && p_pkt->i_pts > 0 &&
-@@ -641,6 +681,9 @@ static int Demux( demux_t *p_demux )
+@@ -641,6 +683,9 @@
                  if( (int64_t)p_pkt->i_pts > p_sys->i_current_pts )
                  {
                      p_sys->i_current_pts = (int64_t)p_pkt->i_pts;
@@ -141,9 +143,20 @@ index 95b4b61..a48b2c7 100644
 +                        p_sys->i_scr_lead = __MAX( p_sys->i_current_pts - VLC_TICK_0 -
 +                            PackClock( p_sys, vlc_stream_Tell( p_demux->s ) ), 0 );
                  }
- 
+
                  if( tk->i_next_block_flags )
-@@ -674,6 +717,106 @@ static int Demux( demux_t *p_demux )
+@@ -662,7 +707,9 @@
+                 block_Release( p_pkt );
+             }
+
+-            p_sys->i_pack_scr = -1;
++            /* Keep the pack clock across PES packets. Only a seek invalidates
++             * it: rebuilding it from every PTS would run the clock backwards
++             * when B pictures arrive in decode order. */
+         }
+         break;
+     }
+@@ -674,6 +721,106 @@
  /*****************************************************************************
   * Control:
   *****************************************************************************/
@@ -250,15 +263,15 @@ index 95b4b61..a48b2c7 100644
  static int Control( demux_t *p_demux, int i_query, va_list args )
  {
      demux_sys_t *p_sys = p_demux->p_sys;
-@@ -706,6 +849,7 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+@@ -706,6 +853,7 @@
              i64 = stream_Size( p_demux->s ) - p_sys->i_start_byte;
              p_sys->i_current_pts = 0;
              p_sys->i_scr = -1;
 +            p_sys->i_pack_scr = -1;
- 
+
              if( p_sys->format == CDXA_PS )
              {
-@@ -729,7 +873,9 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+@@ -729,7 +877,9 @@
              pi64 = va_arg( args, int64_t * );
              if( p_sys->i_time_track_index >= 0 && p_sys->i_current_pts > 0 )
              {
@@ -269,7 +282,7 @@ index 95b4b61..a48b2c7 100644
                  return VLC_SUCCESS;
              }
              if( p_sys->i_first_scr > -1 && p_sys->i_scr > -1 )
-@@ -755,21 +901,41 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
+@@ -755,21 +905,41 @@
              }
              else if( p_sys->i_mux_rate > 0 )
              {
@@ -282,19 +295,20 @@ index 95b4b61..a48b2c7 100644
              }
              *pi64 = 0;
              break;
- 
+
          case DEMUX_SET_TIME:
 +        {
              i64 = va_arg( args, int64_t );
 -            if( p_sys->i_time_track_index >= 0 && p_sys->i_current_pts > 0 && p_sys->i_length )
+-            {
+-                i64 -= p_sys->tk[p_sys->i_time_track_index].i_first_pts;
+-                return demux_Control( p_demux, DEMUX_SET_POSITION, (double) i64 / p_sys->i_length );
 +            bool b_precise = va_arg( args, int );
 +            /* The length and the time track are found before the first packet
 +             * is read, so a start time is sought the same way. */
 +            if( p_sys->i_time_track_index >= 0 && p_sys->i_length > 0 &&
 +                p_sys->b_seekable )
-             {
--                i64 -= p_sys->tk[p_sys->i_time_track_index].i_first_pts;
--                return demux_Control( p_demux, DEMUX_SET_POSITION, (double) i64 / p_sys->i_length );
++            {
 +                /* The time is the one DEMUX_GET_TIME reports, relative to the
 +                 * time track's first timestamp. */
 +                const vlc_tick_t i_time = p_sys->tk[p_sys->i_time_track_index].i_first_pts + i64;
@@ -313,6 +327,6 @@ index 95b4b61..a48b2c7 100644
              }
              break;
 +        }
- 
+
          case DEMUX_GET_TITLE_INFO:
          {

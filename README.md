@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-13 | `libvlc-lgpl-3.7.6-13` |
 | 3.7.6-12 | `libvlc-lgpl-3.7.6-12` |
 | 3.7.6-11 | `libvlc-lgpl-3.7.6-11` |
 | 3.7.6-10 | `libvlc-lgpl-3.7.6-10` |
@@ -163,10 +164,13 @@ muxer wrote ahead, and a seek landed past the key picture the picture at the tim
   for a time by the timestamps of the time track; a precise seek, a start time included, lands one to two
   seconds before it and shows from it; find the length on any packet; advance the clock between pack
   headers by the bytes at the mux rate, counted in its units of 50 bytes, and take it from a timestamp
-  after a seek; report the time of the clock the pictures are shown by.
+  after a seek; retain the pack clock between PES packets so reordered B-picture timestamps do not
+  reset it; report the time of the clock the pictures are shown by.
 - `patches/vlc/0014-ts-take-times-from-the-first-picture-and-decode-a-precise-seek-from-its-key-picture.patch`:
   take times from the first picture or sound due; a precise seek lands two seconds earlier by the clock,
-  decodes from there and shows from the time.
+  decodes from there and shows from the time; record the last presentation timestamp separately
+  from the last PCR/DTS and compute length between presentation endpoints, so short streams
+  cannot have a negative length from mixed clock origins.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and
