@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000016 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 9 Oct 2026 11:00:00 +0900
+Subject: [PATCH] input: process the start time seek before demuxing pictures
+
+The input queued its start-time seek but demuxed once before processing
+it. A software-decoded ASF picture could reach the surface before the
+seek flush, so capturing the first output returned frame zero. Drain the
+initial controls before the first demux when a start time is requested.
+Only demuxers that already report a length are ready for this; MPEG-PS
+and others that discover the timeline by demuxing retain the first probe.
+The zero control deadline avoids waiting for a clock before demux starts.
+
+---
+
+diff --git a/src/input/input.c b/src/input/input.c
+--- a/src/input/input.c
++++ b/src/input/input.c
+@@ -704,6 +704,12 @@
+
+     demux_t *p_demux = input_priv(p_input)->master->p_demux;
+     const bool b_can_demux = p_demux->pf_demux != NULL;
++    /* Some demuxers discover their timeline only on the first demux (MPEG-PS
++     * among them). Seek before it only when opening already found a length. */
++    vlc_tick_t i_length;
++    bool b_initial_seek = input_priv(p_input)->i_start > 0 &&
++                          !demux_Control( p_demux, DEMUX_GET_LENGTH, &i_length ) &&
++                          i_length > 0;
+
+     while( !input_Stopped( p_input ) && input_priv(p_input)->i_state != ERROR_S )
+     {
+@@ -716,7 +722,16 @@
+             b_paused = !es_out_GetBuffering( input_priv(p_input)->p_es_out )
+                     || input_priv(p_input)->master->b_eof;
+
+-        if( !b_paused )
++        /* StartTitle queued the initial seek. Drain those controls before
++         * demuxing: a fast software decoder can otherwise display the start
++         * of the file before the seek flushes it. A zero deadline drains only
++         * the queued controls, then permits the first demux iteration. */
++        if( b_initial_seek )
++        {
++            b_initial_seek = false;
++            i_wakeup = 0;
++        }
++        else if( !b_paused )
+         {
+             if( !input_priv(p_input)->master->b_eof )
+             {

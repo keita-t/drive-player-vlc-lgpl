@@ -10,6 +10,7 @@ The tag holds exactly the sources, patches and build scripts that produced that 
 
 | Library version | Tag |
 |---|---|
+| 3.7.6-14 | `libvlc-lgpl-3.7.6-14` |
 | 3.7.6-13 | `libvlc-lgpl-3.7.6-13` |
 | 3.7.6-12 | `libvlc-lgpl-3.7.6-12` |
 | 3.7.6-11 | `libvlc-lgpl-3.7.6-11` |
@@ -171,6 +172,21 @@ muxer wrote ahead, and a seek landed past the key picture the picture at the tim
   decodes from there and shows from the time; record the last presentation timestamp separately
   from the last PCR/DTS and compute length between presentation endpoints, so short streams
   cannot have a negative length from mixed clock origins.
+
+Raw AMR stores one byte of framing per channel every 20 ms. Its estimated bitrate counts only the
+codec payload, which overestimates duration when applied to the whole stored file:
+
+- `patches/vlc/0015-avformat-include-AMR-storage-framing-in-the-duration-estimate.patch`: include
+  the 400 bits/s per channel of storage framing in the bitrate-derived duration. Timestamp and
+  container durations remain authoritative, without an extra scan of the whole input.
+
+An input queues its requested start-time seek before playback. A software decoder could display a
+picture from the beginning during the first demux, before that seek was processed:
+
+- `patches/vlc/0016-input-process-the-start-time-seek-before-demuxing-pictures.patch`: drain the
+  initial queued controls before the first demux when opening has already found the timeline's length.
+  Inputs that discover their timeline during the first demux retain that initial probe. A zero control
+  deadline prevents waiting for a clock before demuxing starts.
 
 Features the app does not use are also left out: stream output (transcoding, recording, casting), network
 access and streaming protocols, disc playback, Lua scripts, tag reading, service discovery, fontconfig, and

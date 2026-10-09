@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000015 Mon Sep 17 00:00:00 2001
+From: Drive Player <drive-player@localhost>
+Date: Fri, 9 Oct 2026 11:00:00 +0900
+Subject: [PATCH] avformat: include AMR storage framing in the duration estimate
+
+Each stored AMR frame includes a one-byte TOC every 20 ms, but the
+bitrate used to estimate raw AMR duration counts only the codec payload.
+Include the 400 bits/s per channel of storage framing in that estimate,
+without scanning the entire borrowed input or changing metadata durations.
+
+---
+
+diff --git a/modules/demux/avformat/demux.c b/modules/demux/avformat/demux.c
+--- a/modules/demux/avformat/demux.c
++++ b/modules/demux/avformat/demux.c
+@@ -47,6 +47,7 @@
+
+ #include <libavformat/avformat.h>
+ #include <libavutil/display.h>
++#include <libavutil/mathematics.h>
+
+ //#define AVFORMAT_DEBUG 1
+
+@@ -409,6 +410,20 @@
+         avformat_CloseDemux( p_this );
+         return VLC_EGENERIC;
+     }
++    /* Raw AMR's estimated bitrate omits the storage header: one byte per
++     * channel every 20 ms. Counting the whole file at the payload rate makes
++     * duration too long. Keep the estimate, but include that framing overhead;
++     * durations obtained from timestamps or container metadata stay authoritative. */
++    if( !strcmp( p_sys->fmt->name, "amr" ) && nb_streams == 1 &&
++        p_sys->ic->duration_estimation_method == AVFMT_DURATION_FROM_BITRATE &&
++        p_sys->ic->duration != AV_NOPTS_VALUE && p_sys->ic->bit_rate > 0 )
++    {
++        const int i_channels = p_sys->ic->streams[0]->codecpar->ch_layout.nb_channels;
++        if( i_channels > 0 )
++            p_sys->ic->duration = av_rescale( p_sys->ic->duration, p_sys->ic->bit_rate,
++                                            p_sys->ic->bit_rate + 400LL * i_channels );
++    }
++
+     p_sys->tracks = calloc( nb_streams, sizeof(*p_sys->tracks) );
+     if( !p_sys->tracks )
+     {
